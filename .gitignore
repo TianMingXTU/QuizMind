@@ -1,0 +1,7 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.quizmind_memory/
+.quizmind_runtime/
+.quizmind/__pycache__/
