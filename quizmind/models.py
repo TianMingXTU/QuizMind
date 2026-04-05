@@ -3,26 +3,77 @@ from __future__ import annotations
 from enum import Enum
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+DIFFICULTY_ALIASES = {
+    "easy": "easy",
+    "medium": "medium",
+    "hard": "hard",
+    "simple": "easy",
+    "normal": "medium",
+    "difficult": "hard",
+    "简单": "easy",
+    "中等": "medium",
+    "困难": "hard",
+}
+
+QUESTION_TYPE_ALIASES = {
+    "single_choice": "single_choice",
+    "multiple_choice": "multiple_choice",
+    "fill_blank": "fill_blank",
+    "short_answer": "short_answer",
+    "true_false": "true_false",
+    "single": "single_choice",
+    "multiple": "multiple_choice",
+    "single choice": "single_choice",
+    "multiple choice": "multiple_choice",
+    "fill in the blank": "fill_blank",
+    "short": "short_answer",
+    "true/false": "true_false",
+    "singlechoice": "single_choice",
+    "multi": "multiple_choice",
+    "单选题": "single_choice",
+    "多选题": "multiple_choice",
+    "填空题": "fill_blank",
+    "简答题": "short_answer",
+    "判断题": "true_false",
+}
 
 
 class Difficulty(str, Enum):
-    easy = "简单"
-    medium = "中等"
-    hard = "困难"
+    easy = "easy"
+    medium = "medium"
+    hard = "hard"
+
+    @classmethod
+    def normalize(cls, raw: object) -> str:
+        return DIFFICULTY_ALIASES.get(str(raw or "").strip().lower(), "medium")
 
 
 class QuestionType(str, Enum):
-    single_choice = "单选题"
-    multiple_choice = "多选题"
-    fill_blank = "填空题"
-    short_answer = "简答题"
-    true_false = "判断题"
+    single_choice = "single_choice"
+    multiple_choice = "multiple_choice"
+    fill_blank = "fill_blank"
+    short_answer = "short_answer"
+    true_false = "true_false"
+
+    @classmethod
+    def normalize(cls, raw: object) -> str:
+        value = str(raw or "").strip().lower()
+        return QUESTION_TYPE_ALIASES.get(value, "single_choice")
 
 
 class QuizMode(str, Enum):
-    practice = "练习模式"
-    exam = "考试模式"
+    practice = "practice"
+    exam = "exam"
+
+    @classmethod
+    def normalize(cls, raw: object) -> str:
+        value = str(raw or "").strip().lower()
+        if value in {"exam", "考试模式", "鑰冭瘯妯″紡"}:
+            return "exam"
+        return "practice"
 
 
 class KnowledgePoint(BaseModel):
@@ -31,6 +82,11 @@ class KnowledgePoint(BaseModel):
     importance: int = Field(ge=1, le=5)
     difficulty: Difficulty
     keywords: List[str] = Field(default_factory=list)
+
+    @field_validator("difficulty", mode="before")
+    @classmethod
+    def _normalize_difficulty(cls, value: object) -> str:
+        return Difficulty.normalize(value)
 
 
 class ParsedContent(BaseModel):
@@ -52,6 +108,16 @@ class Question(BaseModel):
     knowledge_tags: List[str]
     difficulty: Difficulty
     reference_points: List[str] = Field(default_factory=list)
+
+    @field_validator("question_type", mode="before")
+    @classmethod
+    def _normalize_question_type(cls, value: object) -> str:
+        return QuestionType.normalize(value)
+
+    @field_validator("difficulty", mode="before")
+    @classmethod
+    def _normalize_difficulty(cls, value: object) -> str:
+        return Difficulty.normalize(value)
 
 
 class Quiz(BaseModel):
@@ -98,17 +164,45 @@ class FeedbackReport(BaseModel):
 class QuizConfig(BaseModel):
     question_count: int = Field(default=10, ge=1, le=50)
     difficulty_mix: Dict[str, int] = Field(
-        default_factory=lambda: {"简单": 30, "中等": 50, "困难": 20}
+        default_factory=lambda: {"easy": 30, "medium": 50, "hard": 20}
     )
     type_mix: Dict[str, int] = Field(
         default_factory=lambda: {
-            "单选题": 35,
-            "多选题": 15,
-            "填空题": 20,
-            "简答题": 20,
-            "判断题": 10,
+            "single_choice": 35,
+            "multiple_choice": 15,
+            "fill_blank": 20,
+            "short_answer": 20,
+            "true_false": 10,
         }
     )
+
+    @field_validator("difficulty_mix", mode="before")
+    @classmethod
+    def _normalize_difficulty_mix(cls, value: object) -> Dict[str, int]:
+        if not isinstance(value, dict):
+            return {"easy": 30, "medium": 50, "hard": 20}
+        out: Dict[str, int] = {}
+        for key, ratio in value.items():
+            norm = Difficulty.normalize(key)
+            out[norm] = int(ratio)
+        return out
+
+    @field_validator("type_mix", mode="before")
+    @classmethod
+    def _normalize_type_mix(cls, value: object) -> Dict[str, int]:
+        if not isinstance(value, dict):
+            return {
+                "single_choice": 35,
+                "multiple_choice": 15,
+                "fill_blank": 20,
+                "short_answer": 20,
+                "true_false": 10,
+            }
+        out: Dict[str, int] = {}
+        for key, ratio in value.items():
+            norm = QuestionType.normalize(key)
+            out[norm] = int(ratio)
+        return out
 
 
 class MemorySnapshot(BaseModel):

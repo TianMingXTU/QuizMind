@@ -88,7 +88,7 @@ class MemoryStore:
                     metadata={
                         "title": parsed.title,
                         "source_type": parsed.source_type,
-                        "concepts": "、".join(parsed.concepts[:8]),
+                        "concepts": ", ".join(parsed.concepts[:8]),
                     },
                 )
                 for segment in parsed.segments
@@ -124,7 +124,7 @@ class MemoryStore:
         with timed_event("memory.build_content", query=query, top_k=top_k):
             documents = self.retrieve(query=query, top_k=top_k)
             if not documents:
-                raise ValueError("记忆库为空，请先保存一些学习内容。")
+                raise ValueError("Memory store is empty. Save some parsed content first.")
             sample_size = min(len(documents), max(2, min(top_k, len(documents))))
             selected = random.sample(documents, k=sample_size)
             merged_text = "\n".join(doc.page_content for doc in selected)

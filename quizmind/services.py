@@ -4,7 +4,7 @@ import math
 import random
 import re
 from collections import defaultdict
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 from quizmind.content import fallback_parse_content
 from quizmind.llm import LangChainQuizProvider
@@ -22,6 +22,7 @@ from quizmind.models import (
     QuizConfig,
     UserAnswer,
 )
+from quizmind.quiz_bank import QuizBank
 
 
 class ContentService:
@@ -30,33 +31,202 @@ class ContentService:
 
     def parse(self, source: str, source_type: str) -> ParsedContent:
         with timed_event("service.parse_content", source_type=source_type):
-            return self.provider.parse_content(source, source_type)
+            try:
+                return self.provider.parse_content(source, source_type)
+            except Exception as exc:
+                log_event("service.parse_content.fallback", source_type=source_type, error=str(exc))
+                return fallback_parse_content(source, source_type)
+
+    def generate_interactive_html(self, parsed: ParsedContent, allow_ai_generation: bool = True) -> str:
+        with timed_event("service.generate_interactive_html", title=parsed.title):
+            if allow_ai_generation:
+                html = self.provider.generate_interactive_html(parsed)
+                if html and html.strip():
+                    return html
+            return self._build_local_interactive_html(parsed)
+
+    def _build_local_interactive_html(self, parsed: ParsedContent) -> str:
+        topics = parsed.knowledge_points[:6]
+        if not topics:
+            return "<div style='padding:12px;border:1px solid #ddd;border-radius:10px;'>暂无可展示知识点。</div>"
+
+        buttons = []
+        cards = []
+        for idx, point in enumerate(topics):
+            active = "active" if idx == 0 else ""
+            safe_name = point.name.replace("'", "\\'")
+            buttons.append(
+                f"<button class='tab-btn {active}' onclick=\"showCard({idx})\">{safe_name}</button>"
+            )
+            cards.append(
+                (
+                    f"<div class='card {active}' id='card-{idx}'>"
+                    f"<h3>{point.name}</h3>"
+                    f"<p>{point.summary}</p>"
+                    f"<div class='meta'>关键词：{'、'.join(point.keywords[:5]) or '无'}</div>"
+                    f"</div>"
+                )
+            )
+
+        quiz_data = []
+        for idx, point in enumerate(topics[:3], start=1):
+            correct = point.keywords[0] if point.keywords else point.name
+            quiz_data.append(
+                {
+                    "id": idx,
+                    "q": f"“{point.name}”最相关的关键词是？",
+                    "opts": [correct, "边界条件", "外部因素"],
+                    "a": correct,
+                }
+            )
+
+        html = f"""
+<div class="km-wrap">
+  <h2>互动知识卡：{parsed.title}</h2>
+  <div class="tabs">{''.join(buttons)}</div>
+  <div class="cards">{''.join(cards)}</div>
+  <div class="quiz">
+    <h3>快速自测</h3>
+    <div id="quiz-box"></div>
+  </div>
+</div>
+<style>
+.km-wrap{{font-family: "Microsoft YaHei", Arial, sans-serif; padding:12px; background:#f8fbff; border:1px solid #d9e7f5; border-radius:12px;}}
+.tabs{{display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 12px;}}
+.tab-btn{{border:1px solid #b7cde5; background:#fff; border-radius:999px; padding:6px 12px; cursor:pointer;}}
+.tab-btn.active{{background:#1f6feb; color:#fff; border-color:#1f6feb;}}
+.card{{display:none; background:#fff; border:1px solid #dbe7f3; border-radius:10px; padding:10px;}}
+.card.active{{display:block;}}
+.meta{{font-size:12px; color:#4b5563; margin-top:8px;}}
+.quiz{{margin-top:14px; background:#fff; border:1px solid #dbe7f3; border-radius:10px; padding:10px;}}
+.q-item{{margin:8px 0 12px;}}
+.q-opt{{margin:4px 0;}}
+.q-result{{font-size:12px; margin-top:4px;}}
+</style>
+<script>
+const quizData = {quiz_data};
+function showCard(i){{
+  document.querySelectorAll('.card').forEach((el,idx)=>el.classList.toggle('active', idx===i));
+  document.querySelectorAll('.tab-btn').forEach((el,idx)=>el.classList.toggle('active', idx===i));
+}}
+function renderQuiz(){{
+  const box = document.getElementById('quiz-box');
+  box.innerHTML = '';
+  quizData.forEach((item, idx)=>{{
+    const div = document.createElement('div');
+    div.className = 'q-item';
+    div.innerHTML = `<div><strong>${{idx+1}}.</strong> ${{item.q}}</div>`;
+    item.opts.forEach(opt=>{{
+      const row = document.createElement('div');
+      row.className = 'q-opt';
+      const id = `q${{item.id}}-${{opt}}`;
+      row.innerHTML = `<label><input type="radio" name="q${{item.id}}" value="${{opt}}"> ${{opt}}</label>`;
+      div.appendChild(row);
+    }});
+    const btn = document.createElement('button');
+    btn.textContent = '检查答案';
+    btn.onclick = ()=>{{
+      const checked = div.querySelector(`input[name="q${{item.id}}"]:checked`);
+      const result = div.querySelector('.q-result') || document.createElement('div');
+      result.className='q-result';
+      if(!checked){{ result.textContent='请先选择答案'; result.style.color='#b45309'; }}
+      else if(checked.value===item.a){{ result.textContent='回答正确'; result.style.color='#166534'; }}
+      else {{ result.textContent=`回答错误，正确答案：${{item.a}}`; result.style.color='#b91c1c'; }}
+      if(!div.querySelector('.q-result')) div.appendChild(result);
+    }};
+    div.appendChild(btn);
+    box.appendChild(div);
+  }});
+}}
+renderQuiz();
+</script>
+"""
+        return html
 
 
 class QuizEngine:
     def __init__(self) -> None:
         self.provider = LangChainQuizProvider()
         self.memory_store = MemoryStore()
+        self.quiz_bank = QuizBank()
 
-    def generate_quiz(self, parsed: ParsedContent, config: QuizConfig) -> Quiz:
+    def generate_or_load_from_source(
+        self,
+        source: str,
+        source_type: str,
+        source_name: str,
+        config: QuizConfig,
+        use_saved_first: bool = True,
+        allow_ai_generation: bool = True,
+    ) -> Tuple[ParsedContent, Quiz, Dict[str, object]]:
+        signature = self.quiz_bank.build_signature(source, source_type, config)
+        if use_saved_first:
+            found = self.quiz_bank.find_by_signature(signature)
+            if found:
+                parsed, quiz, item = found
+                log_event("quiz_bank.hit", source_name=source_name, record_id=item.get("id", ""))
+                return parsed, quiz, {"from_saved": True, "record_id": item.get("id", "")}
+
+        if allow_ai_generation:
+            parsed, quiz = self.generate_from_source(source, source_type, config)
+            used_ai = True
+        else:
+            parsed = fallback_parse_content(source, source_type)
+            quiz = self._generate_locally(parsed, config)
+            used_ai = False
+
+        record_id = self.quiz_bank.save(
+            signature=signature,
+            source_name=source_name,
+            source_type=source_type,
+            used_ai=used_ai,
+            parsed=parsed,
+            quiz=quiz,
+        )
+        return parsed, quiz, {"from_saved": False, "record_id": record_id}
+
+    def generate_quiz(
+        self,
+        parsed: ParsedContent,
+        config: QuizConfig,
+        allow_ai_generation: bool = True,
+    ) -> Quiz:
         with timed_event("service.generate_quiz", title=parsed.title, question_count=config.question_count):
-            llm_quiz = self.provider.generate_quiz(parsed, config)
-            if llm_quiz:
-                return llm_quiz
+            if allow_ai_generation:
+                try:
+                    llm_quiz = self.provider.generate_quiz(parsed, config)
+                    if llm_quiz:
+                        return llm_quiz
+                except Exception as exc:
+                    log_event("service.generate_quiz.provider_error", title=parsed.title, error=str(exc))
             log_event("service.generate_quiz.fallback_local", title=parsed.title)
             return self._generate_locally(parsed, config)
 
-    def generate_from_source(self, source: str, source_type: str, config: QuizConfig) -> tuple[ParsedContent, Quiz]:
+    def generate_from_source(
+        self,
+        source: str,
+        source_type: str,
+        config: QuizConfig,
+    ) -> tuple[ParsedContent, Quiz]:
         with timed_event("service.generate_from_source", source_type=source_type):
-            parsed, quiz = self.provider.generate_quiz_from_source(source, source_type, config)
-            if quiz:
-                return parsed, quiz
+            try:
+                parsed, quiz = self.provider.generate_quiz_from_source(source, source_type, config)
+                if quiz:
+                    return parsed, quiz
+            except Exception as exc:
+                log_event("service.generate_from_source.provider_error", source_type=source_type, error=str(exc))
             fallback_parsed = fallback_parse_content(source, source_type)
             return fallback_parsed, self._generate_locally(fallback_parsed, config)
 
-    def generate_from_memory(self, config: QuizConfig, query: str = "", top_k: int = 4) -> tuple[ParsedContent, Quiz]:
+    def generate_from_memory(
+        self,
+        config: QuizConfig,
+        query: str = "",
+        top_k: int = 4,
+        allow_ai_generation: bool = True,
+    ) -> tuple[ParsedContent, Quiz]:
         parsed = self.memory_store.build_memory_content(query=query, top_k=top_k)
-        return parsed, self.generate_quiz(parsed, config)
+        return parsed, self.generate_quiz(parsed, config, allow_ai_generation=allow_ai_generation)
 
     def save_memory(self, parsed: ParsedContent):
         return self.memory_store.add_parsed_content(parsed)
@@ -64,19 +234,48 @@ class QuizEngine:
     def list_memory(self):
         return self.memory_store.list_snapshots()
 
+    def list_saved_quizzes(self, limit: int = 30):
+        return self.quiz_bank.list_recent(limit=limit)
+
+    def search_saved_quizzes(
+        self,
+        file_name_keyword: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        tag_keyword: str = "",
+        limit: int = 200,
+    ):
+        return self.quiz_bank.search(
+            file_name_keyword=file_name_keyword,
+            date_from=date_from,
+            date_to=date_to,
+            tag_keyword=tag_keyword,
+            limit=limit,
+        )
+
+    def load_saved_quiz(self, record_id: str) -> tuple[ParsedContent, Quiz] | None:
+        found = self.quiz_bank.get_by_id(record_id)
+        if not found:
+            return None
+        parsed, quiz, _ = found
+        return parsed, quiz
+
+    def delete_saved_quiz(self, record_id: str) -> bool:
+        return self.quiz_bank.delete_by_id(record_id)
+
     def _generate_locally(self, parsed: ParsedContent, config: QuizConfig) -> Quiz:
         questions: List[Question] = []
         type_targets = self._distribution_targets(config.question_count, config.type_mix)
-        difficulty_targets = self._distribution_targets(config.question_count, config.difficulty_mix)
+        diff_targets = self._distribution_targets(config.question_count, config.difficulty_mix)
         points = parsed.knowledge_points or []
         if not points:
-            raise ValueError("没有足够内容可用于生成题目。")
+            raise ValueError("可用于出题的内容不足，请补充学习材料。")
 
         point_index = 0
         for qtype_name, count in type_targets.items():
             for _ in range(count):
                 point = points[point_index % len(points)]
-                difficulty = self._next_difficulty(difficulty_targets)
+                difficulty = self._next_difficulty(diff_targets)
                 questions.append(
                     self._build_question(
                         point=point,
@@ -89,7 +288,7 @@ class QuizEngine:
 
         return Quiz(
             title=f"{parsed.title} - 智能练习",
-            source_summary="、".join(parsed.concepts[:6]) or parsed.title,
+            source_summary="，".join(parsed.concepts[:6]) or parsed.title,
             questions=questions[: config.question_count],
         )
 
@@ -103,7 +302,7 @@ class QuizEngine:
         return counts
 
     def _next_difficulty(self, targets: Dict[str, int]) -> Difficulty:
-        for name in ("中等", "简单", "困难"):
+        for name in ("medium", "easy", "hard"):
             if targets.get(name, 0) > 0:
                 targets[name] -= 1
                 return Difficulty(name)
@@ -112,6 +311,7 @@ class QuizEngine:
     def _build_question(self, point, question_type: QuestionType, difficulty: Difficulty, qid: str) -> Question:
         keyword = point.keywords[0] if point.keywords else point.name
         distractors = self._make_distractors(point)
+
         if question_type == QuestionType.single_choice:
             options = [keyword, *distractors[:3]]
             random.shuffle(options)
@@ -121,11 +321,12 @@ class QuizEngine:
                 prompt=f"根据学习内容，以下哪一项最符合“{point.name}”的核心概念？",
                 options=options,
                 correct_answer=[keyword],
-                explanation=f"{point.name} 的核心说明是：{point.summary}",
+                explanation=f"{point.name} 的核心解释：{point.summary}",
                 knowledge_tags=[point.name],
                 difficulty=difficulty,
                 reference_points=point.keywords,
             )
+
         if question_type == QuestionType.multiple_choice:
             correct = point.keywords[:2] if len(point.keywords) >= 2 else [keyword, point.name]
             options = list(dict.fromkeys(correct + distractors[:2]))
@@ -136,22 +337,24 @@ class QuizEngine:
                 prompt=f"以下哪些选项与“{point.name}”直接相关？",
                 options=options,
                 correct_answer=correct,
-                explanation=f"与 {point.name} 直接相关的关键点包括：{'、'.join(correct)}。",
+                explanation=f"直接相关的关键点包括：{'，'.join(correct)}",
                 knowledge_tags=[point.name],
                 difficulty=difficulty,
                 reference_points=point.keywords,
             )
+
         if question_type == QuestionType.fill_blank:
             return Question(
                 id=qid,
                 question_type=question_type,
                 prompt=f"填空：{point.summary.replace(keyword, '____', 1)}",
                 correct_answer=[keyword],
-                explanation=f"该空应填写 {keyword}，因为它是该知识点的核心术语。",
+                explanation=f"该空应为“{keyword}”，它是该知识点的关键术语。",
                 knowledge_tags=[point.name],
                 difficulty=difficulty,
                 reference_points=point.keywords,
             )
+
         if question_type == QuestionType.true_false:
             return Question(
                 id=qid,
@@ -164,12 +367,13 @@ class QuizEngine:
                 difficulty=difficulty,
                 reference_points=point.keywords,
             )
+
         return Question(
             id=qid,
             question_type=question_type,
-            prompt=f"简要说明“{point.name}”的核心内容，并至少提到两个关键点。",
+            prompt=f"请简要说明“{point.name}”的核心内容，并至少提到两个关键点。",
             correct_answer=[point.summary],
-            explanation=f"作答时应覆盖：{point.summary}",
+            explanation=f"作答建议覆盖：{point.summary}",
             knowledge_tags=[point.name],
             difficulty=difficulty,
             reference_points=point.keywords,
@@ -199,7 +403,11 @@ class GradingService:
                 for question in quiz.questions
                 if question.question_type == QuestionType.short_answer
             ]
-            subjective_grades = self.provider.grade_subjective_batch(subjective_pairs)
+            try:
+                subjective_grades = self.provider.grade_subjective_batch(subjective_pairs)
+            except Exception as exc:
+                log_event("service.grade.subjective_batch_error", error=str(exc))
+                subjective_grades = {}
             if subjective_pairs:
                 log_event(
                     "service.grade.subjective_batch",
@@ -222,7 +430,7 @@ class GradingService:
         normalized_correct = {item.strip() for item in question.correct_answer if item.strip()}
         is_correct = normalized_user == normalized_correct
         score = 100.0 if is_correct else 0.0
-        feedback = "回答正确。" if is_correct else f"正确答案：{'、'.join(question.correct_answer)}。"
+        feedback = "回答正确。 " if is_correct else f"正确答案：{', '.join(question.correct_answer)}。"
         return QuestionResult(
             question_id=question.id,
             is_correct=is_correct,
@@ -260,14 +468,9 @@ class GradingService:
             missing_points=sorted(reference - tokens),
         )
 
-    def _build_report(
-        self,
-        question_map: Dict[str, Question],
-        results: List[QuestionResult],
-    ) -> FeedbackReport:
+    def _build_report(self, question_map: Dict[str, Question], results: List[QuestionResult]) -> FeedbackReport:
         wrong_questions = [result for result in results if not result.is_correct]
         overall_score = round(sum(result.score for result in results) / max(1, len(results)), 2)
-
         objective_scores = [
             result.score
             for result in results
@@ -303,7 +506,7 @@ class GradingService:
 
         reinforcement_topics = [item.knowledge_point for item in knowledge_stats if item.avg_score < 70][:4]
         recommendations = [
-            f"优先复习 {topic}，并重新梳理其定义、关键特征和应用场景。"
+            f"优先复习 {topic}：梳理定义、关键特征和应用场景。"
             for topic in reinforcement_topics
         ] or ["整体掌握较好，建议开始混合难度模拟测试。"]
 
@@ -319,9 +522,7 @@ class GradingService:
 
 
 def build_reinforcement_quiz(parsed: ParsedContent, report: FeedbackReport, config: QuizConfig) -> Quiz:
-    focus_points = [
-        point for point in parsed.knowledge_points if point.name in set(report.reinforcement_topics)
-    ] or parsed.knowledge_points[:3]
+    focus_points = [point for point in parsed.knowledge_points if point.name in set(report.reinforcement_topics)] or parsed.knowledge_points[:3]
     focused = ParsedContent(
         title=f"{parsed.title} - 强化训练",
         source_type=parsed.source_type,
@@ -334,7 +535,14 @@ def build_reinforcement_quiz(parsed: ParsedContent, report: FeedbackReport, conf
         focused,
         QuizConfig(
             question_count=min(max(5, len(focus_points) * 2), config.question_count),
-            difficulty_mix={"简单": 20, "中等": 50, "困难": 30},
-            type_mix={"单选题": 25, "多选题": 20, "填空题": 20, "简答题": 25, "判断题": 10},
+            difficulty_mix={"easy": 20, "medium": 50, "hard": 30},
+            type_mix={
+                "single_choice": 25,
+                "multiple_choice": 20,
+                "fill_blank": 20,
+                "short_answer": 25,
+                "true_false": 10,
+            },
         ),
+        allow_ai_generation=True,
     )

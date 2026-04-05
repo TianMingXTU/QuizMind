@@ -16,31 +16,26 @@ from quizmind.models import Difficulty, KnowledgePoint, ParsedContent
 
 
 STOP_WORDS = {
-    "的",
-    "了",
-    "和",
-    "是",
-    "在",
-    "与",
-    "及",
-    "并",
-    "对",
-    "将",
-    "把",
-    "为",
-    "中",
-    "通过",
-    "一个",
-    "可以",
-    "进行",
-    "如果",
-    "我们",
-    "需要",
-    "使用",
-    "以及",
-    "内容",
-    "系统",
-    "用户",
+    "the",
+    "and",
+    "for",
+    "with",
+    "that",
+    "this",
+    "from",
+    "are",
+    "was",
+    "were",
+    "have",
+    "has",
+    "had",
+    "is",
+    "in",
+    "on",
+    "to",
+    "of",
+    "a",
+    "an",
 }
 
 
@@ -52,10 +47,18 @@ def load_text_from_upload(file_name: str, data: bytes) -> str:
         if suffix == ".pdf":
             reader = PdfReader(io.BytesIO(data))
             return "\n".join(page.extract_text() or "" for page in reader.pages)
-        if suffix in {".docx", ".doc"}:
-            document = Document(io.BytesIO(data))
+        if suffix == ".doc":
+            raise ValueError("Legacy .doc is not supported. Please convert to .docx.")
+        if suffix == ".docx":
+            try:
+                document = Document(io.BytesIO(data))
+            except Exception as exc:
+                raise ValueError(
+                    "This .docx file is not a valid Word document package. "
+                    "Please re-export it as a standard .docx and try again."
+                ) from exc
             return "\n".join(paragraph.text for paragraph in document.paragraphs)
-        raise ValueError(f"暂不支持的文件类型: {suffix}")
+        raise ValueError(f"Unsupported file type: {suffix}")
 
 
 def load_text_from_url(url: str) -> str:
@@ -77,27 +80,28 @@ def normalize_text(text: str) -> str:
 
 
 def split_segments(text: str, max_len: int = 260) -> List[str]:
-    raw_segments = re.split(r"\n+|(?<=[。！？!?])", text)
+    raw_segments = re.split(r"\n+|(?<=[.!?。！？])", text)
     segments: List[str] = []
-    buffer = ""
+    buf = ""
     for part in raw_segments:
         clean = part.strip()
         if not clean:
             continue
-        if len(buffer) + len(clean) < max_len:
-            buffer = f"{buffer}{clean}".strip()
+        if len(buf) + len(clean) <= max_len:
+            buf = f"{buf} {clean}".strip()
         else:
-            if buffer:
-                segments.append(buffer)
-            buffer = clean
-    if buffer:
-        segments.append(buffer)
+            if buf:
+                segments.append(buf)
+            buf = clean
+    if buf:
+        segments.append(buf)
     return segments[:50]
 
 
 def extract_keywords(text: str, limit: int = 15) -> List[str]:
     tokens = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", text)
-    filtered = [token for token in tokens if token not in STOP_WORDS]
+    normalized = [token.lower() for token in tokens]
+    filtered = [token for token in normalized if token not in STOP_WORDS]
     counter = Counter(filtered)
     return [word for word, _ in counter.most_common(limit)]
 
@@ -113,14 +117,15 @@ def infer_difficulty(segment: str) -> Difficulty:
 
 def build_knowledge_points(segments: Iterable[str], keywords: List[str]) -> List[KnowledgePoint]:
     points: List[KnowledgePoint] = []
-    for index, segment in enumerate(segments):
-        local_keywords = [word for word in keywords if word in segment][:4]
+    for index, segment in enumerate(segments, start=1):
+        local_keywords = [word for word in keywords if word in segment.lower()][:4]
         if not local_keywords:
             local_keywords = extract_keywords(segment, limit=4)
+        point_name = local_keywords[0] if local_keywords else f"topic_{index}"
         points.append(
             KnowledgePoint(
-                name=local_keywords[0] if local_keywords else f"知识点{index + 1}",
-                summary=segment[:120],
+                name=point_name,
+                summary=segment[:180],
                 importance=max(1, min(5, len(local_keywords) + 1)),
                 difficulty=infer_difficulty(segment),
                 keywords=local_keywords,
@@ -143,7 +148,7 @@ def fallback_parse_content(source: str, source_type: str) -> ParsedContent:
         segments = split_segments(cleaned)
         keywords = extract_keywords(cleaned)
         knowledge_points = build_knowledge_points(segments, keywords)
-        title = segments[0][:30] if segments else "未命名内容"
+        title = (segments[0][:50] if segments else "untitled_content").strip()
         return ParsedContent(
             title=title,
             source_type=source_type,  # type: ignore[arg-type]

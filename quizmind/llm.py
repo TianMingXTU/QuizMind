@@ -13,7 +13,7 @@ from langchain_openai import ChatOpenAI
 from quizmind.cache import JsonFileCache
 from quizmind.content import fallback_parse_content
 from quizmind.logger import log_event, timed_event
-from quizmind.models import BatchSubjectiveGrade, ParsedContent, Question, Quiz, QuizConfig
+from quizmind.models import BatchSubjectiveGrade, Difficulty, ParsedContent, Question, QuestionType, Quiz, QuizConfig
 
 
 load_dotenv()
@@ -23,7 +23,7 @@ class LangChainQuizProvider:
     def __init__(self) -> None:
         api_key = os.getenv("SILICONFLOW_API_KEY") or os.getenv("OPENAI_API_KEY")
         base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-        self.model = os.getenv("SILICONFLOW_MODEL", "Pro/deepseek-ai/DeepSeek-V3.2")
+        self.model = os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen2.5-72B-Instruct")
         self.cache = JsonFileCache()
         self.llm: Optional[ChatOpenAI] = None
         if api_key:
@@ -32,6 +32,8 @@ class LangChainQuizProvider:
                 api_key=api_key,
                 base_url=base_url,
                 temperature=0.4,
+                timeout=30,
+                max_retries=2,
             )
 
     def parse_content(self, source: str, source_type: str) -> ParsedContent:
@@ -43,10 +45,10 @@ class LangChainQuizProvider:
             operation="parse_content",
             temperature=0.2,
             system_prompt=(
-                "你是知识整理助手。请从用户内容中提取结构化学习信息。"
-                "必须只输出 JSON。字段必须包括：title、source_type、cleaned_text、segments、knowledge_points、concepts。"
-                "knowledge_points 中每个对象必须包括：name、summary、importance、difficulty、keywords。"
-                "difficulty 只能是：简单、中等、困难。"
+                "你是学习内容解析助手。只返回 JSON。"
+                "必须包含字段：title, source_type, cleaned_text, segments, knowledge_points, concepts。"
+                "knowledge_points 每项包含：name, summary, importance(1-5), difficulty(easy|medium|hard), keywords。"
+                "所有自然语言内容请使用简体中文；若无法稳定输出中文，请改用英文，不要输出乱码。"
             ),
             human_prompt="请解析以下学习内容：\n{payload}",
             payload=payload,
@@ -73,17 +75,14 @@ class LangChainQuizProvider:
             operation="generate_quiz",
             temperature=0.5,
             system_prompt=(
-                "你是专业出题助手。请基于学习内容生成高质量练习题。"
-                "必须只输出 JSON。返回结构必须是一个 Quiz 对象，字段包含：title、source_summary、questions。"
-                "每道题必须包含：id、question_type、prompt、options、correct_answer、explanation、"
-                "knowledge_tags、difficulty、reference_points。"
-                "question_type 只能是：单选题、多选题、填空题、简答题、判断题。"
-                "difficulty 只能是：简单、中等、困难。"
+                "你是专业出题助手。只返回 JSON。"
+                "输出结构包含字段：title、source_summary、questions。"
+                "每题字段：id, question_type(single_choice|multiple_choice|fill_blank|short_answer|true_false), "
+                "prompt, options(list), correct_answer(list), explanation, knowledge_tags(list), "
+                "difficulty(easy|medium|hard), reference_points(list)。"
+                "所有自然语言内容请使用简体中文；若无法稳定输出中文，请改用英文，不要输出乱码。"
             ),
-            human_prompt=(
-                "请根据以下解析结果生成题目：\n{payload}\n"
-                "要求：题量和题型分布尽量贴近配置，解析具体，简答题提供可评分要点。"
-            ),
+            human_prompt="请根据以下解析结果生成题目：\n{payload}",
             payload=payload,
         )
         if not response:
@@ -110,17 +109,10 @@ class LangChainQuizProvider:
             temperature=0.5,
             system_prompt=(
                 "你是智能练习系统的核心引擎。"
-                "请一次性完成内容解析与出题，并只输出 JSON。"
-                "返回字段必须包含 parsed_content 和 quiz。"
-                "parsed_content 结构：title、source_type、cleaned_text、segments、knowledge_points、concepts。"
-                "quiz 结构：title、source_summary、questions。"
-                "每道题必须包含：id、question_type、prompt、options、correct_answer、explanation、knowledge_tags、difficulty、reference_points。"
-                "difficulty 只能是：简单、中等、困难。"
+                "一次性完成内容解析与出题。只返回 JSON，必须包含 parsed_content 和 quiz。"
+                "所有自然语言内容请使用简体中文；若无法稳定输出中文，请改用英文，不要输出乱码。"
             ),
-            human_prompt=(
-                "请基于以下原始内容，一次性完成解析和出题：\n{payload}\n"
-                "要求：尽量减少冗余字段，题目数量和比例贴近配置。"
-            ),
+            human_prompt="请处理以下原始内容并输出 parsed_content + quiz：\n{payload}",
             payload=payload,
         )
         if not response:
@@ -129,10 +121,7 @@ class LangChainQuizProvider:
 
         try:
             parsed_data = self._normalize_parsed_payload(response.get("parsed_content", {}), source_type)
-            quiz_data = self._normalize_quiz_payload(
-                response.get("quiz", {}),
-                parsed_data.get("title", "智能练习"),
-            )
+            quiz_data = self._normalize_quiz_payload(response.get("quiz", {}), parsed_data.get("title", "Quiz"))
             return ParsedContent.model_validate(parsed_data), Quiz.model_validate(quiz_data)
         except Exception as exc:
             log_event("generate_quiz_from_source.fallback", reason=str(exc))
@@ -162,13 +151,11 @@ class LangChainQuizProvider:
             operation="grade_subjective_batch",
             temperature=0.1,
             system_prompt=(
-                "你是严格但友好的阅卷老师。"
-                "请批量对多道简答题评分，并只输出 JSON。"
-                "返回字段必须为 grades，且 grades 是数组。"
-                "数组中每项必须包含：question_id、score、feedback、missing_points。"
-                "score 范围为 0 到 100。"
+                "你是严格且友好的阅卷老师。只返回 JSON。"
+                "输出结构包含字段 grades，且每项包含 question_id、score、feedback、missing_points。"
+                "score 范围是 0-100。feedback 和 missing_points 请使用简体中文；若无法稳定中文，请改用英文，不要输出乱码。"
             ),
-            human_prompt="请对以下作答批量评分：\n{payload}",
+            human_prompt="请批量评分以下主观题作答：\n{payload}",
             payload=payload,
         )
         if not response:
@@ -177,15 +164,41 @@ class LangChainQuizProvider:
         grades = response.get("grades", [])
         result: dict[str, BatchSubjectiveGrade] = {}
         for item in grades:
-            normalized = {
-                "question_id": str(item.get("question_id", "")),
-                "score": float(item.get("score", 0)),
-                "feedback": str(item.get("feedback", "")),
-                "missing_points": [str(point) for point in item.get("missing_points", [])],
-            }
-            grade = BatchSubjectiveGrade.model_validate(normalized)
+            grade = BatchSubjectiveGrade.model_validate(
+                {
+                    "question_id": str(item.get("question_id", "")),
+                    "score": float(item.get("score", 0)),
+                    "feedback": str(item.get("feedback", "")),
+                    "missing_points": [str(point) for point in item.get("missing_points", [])],
+                }
+            )
             result[grade.question_id] = grade
         return result
+
+    def generate_interactive_html(self, parsed: ParsedContent) -> Optional[str]:
+        if not self.llm:
+            return None
+
+        payload = {
+            "title": parsed.title,
+            "concepts": parsed.concepts[:8],
+            "knowledge_points": [point.model_dump() for point in parsed.knowledge_points[:8]],
+        }
+        return self._invoke_text(
+            operation="generate_interactive_html",
+            temperature=0.3,
+            system_prompt=(
+                "你是前端交互学习页面生成助手。"
+                "请输出一个完整可嵌入的 HTML 片段（包含 style 和 script），"
+                "用于帮助用户理解知识点。"
+                "要求：中文文案、结构清晰、卡片式布局、可点击切换知识点、"
+                "包含一个小测验区（1-3题，单选）和即时反馈。"
+                "中文优先；若无法稳定中文，请改用英文，不要输出乱码。"
+                "不要依赖外部 CDN，不要输出 markdown 代码块。"
+            ),
+            human_prompt="请基于以下解析结果生成互动学习网页：\n{payload}",
+            payload=payload,
+        )
 
     def _invoke_json(
         self,
@@ -200,11 +213,7 @@ class LangChainQuizProvider:
 
         cache_key = self.cache.build_key(
             operation,
-            {
-                "model": self.model,
-                "temperature": temperature,
-                "payload": payload,
-            },
+            {"model": self.model, "temperature": temperature, "payload": payload},
         )
         cached = self.cache.get(cache_key)
         if cached is not None:
@@ -212,18 +221,66 @@ class LangChainQuizProvider:
             return cached
 
         log_event("llm.cache_miss", operation=operation, key=cache_key)
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", system_prompt),
-                ("human", human_prompt),
-            ]
+        try:
+            prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", human_prompt)])
+            chain = prompt | self.llm.bind(temperature=temperature) | StrOutputParser()
+            with timed_event("llm.invoke", operation=operation, model=self.model):
+                text = chain.invoke({"payload": json.dumps(payload, ensure_ascii=False)})
+            data = self._parse_json(text)
+            self.cache.set(cache_key, data)
+            return data
+        except Exception as exc:
+            log_event(
+                "llm.invoke_failed",
+                operation=operation,
+                model=self.model,
+                error_type=exc.__class__.__name__,
+                error=str(exc),
+            )
+            return None
+
+    def _invoke_text(
+        self,
+        operation: str,
+        temperature: float,
+        system_prompt: str,
+        human_prompt: str,
+        payload: dict,
+    ) -> Optional[str]:
+        if not self.llm:
+            return None
+
+        cache_key = self.cache.build_key(
+            operation,
+            {"model": self.model, "temperature": temperature, "payload": payload},
         )
-        chain = prompt | self.llm.bind(temperature=temperature) | StrOutputParser()
-        with timed_event("llm.invoke", operation=operation, model=self.model):
-            text = chain.invoke({"payload": json.dumps(payload, ensure_ascii=False)})
-        data = self._parse_json(text)
-        self.cache.set(cache_key, data)
-        return data
+        cached = self.cache.get(cache_key)
+        if isinstance(cached, dict) and isinstance(cached.get("text"), str):
+            log_event("llm.cache_hit", operation=operation, key=cache_key)
+            return str(cached["text"])
+
+        log_event("llm.cache_miss", operation=operation, key=cache_key)
+        try:
+            prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", human_prompt)])
+            chain = prompt | self.llm.bind(temperature=temperature) | StrOutputParser()
+            with timed_event("llm.invoke", operation=operation, model=self.model):
+                text = chain.invoke({"payload": json.dumps(payload, ensure_ascii=False)}).strip()
+
+            if text.startswith("```"):
+                text = re.sub(r"^```(?:html)?\s*", "", text)
+                text = re.sub(r"\s*```$", "", text)
+
+            self.cache.set(cache_key, {"text": text})
+            return text
+        except Exception as exc:
+            log_event(
+                "llm.invoke_failed",
+                operation=operation,
+                model=self.model,
+                error_type=exc.__class__.__name__,
+                error=str(exc),
+            )
+            return None
 
     def _parse_json(self, text: str) -> dict:
         cleaned = text.strip()
@@ -239,74 +296,60 @@ class LangChainQuizProvider:
             return json.loads(match.group(0))
 
     def _normalize_parsed_payload(self, data: dict, source_type: str) -> dict:
-        knowledge_points = []
+        points = []
         for item in data.get("knowledge_points", []):
             if isinstance(item, str):
-                knowledge_points.append(
+                points.append(
                     {
                         "name": item,
                         "summary": item,
                         "importance": 3,
-                        "difficulty": "中等",
+                        "difficulty": Difficulty.medium.value,
                         "keywords": [item],
                     }
                 )
                 continue
             if not isinstance(item, dict):
                 continue
-            knowledge_points.append(
+            points.append(
                 {
                     "name": str(item.get("name", "未命名知识点")),
                     "summary": str(item.get("summary", "")),
                     "importance": int(item.get("importance", 3)),
-                    "difficulty": self._normalize_difficulty(item.get("difficulty")),
-                    "keywords": [str(keyword) for keyword in item.get("keywords", [])],
+                    "difficulty": Difficulty.normalize(item.get("difficulty")),
+                    "keywords": [str(k) for k in item.get("keywords", [])],
                 }
             )
 
-        raw_segments = data.get("segments", [])
-        raw_concepts = data.get("concepts", [])
-        segments = [str(segment) for segment in raw_segments] if isinstance(raw_segments, list) else []
-        concepts = [str(concept) for concept in raw_concepts] if isinstance(raw_concepts, list) else []
-        segments = [segment for segment in segments if segment.strip()]
-        concepts = [concept for concept in concepts if concept.strip()]
+        segments = [str(seg) for seg in data.get("segments", []) if str(seg).strip()]
+        concepts = [str(c) for c in data.get("concepts", []) if str(c).strip()]
         return {
             "title": str(data.get("title", "未命名内容")),
             "source_type": source_type,
             "cleaned_text": str(data.get("cleaned_text", "")),
             "segments": segments,
-            "knowledge_points": knowledge_points,
+            "knowledge_points": points,
             "concepts": concepts,
         }
 
     def _normalize_quiz_payload(self, data: dict, fallback_title: str) -> dict:
         questions = []
         for index, question in enumerate(data.get("questions", []), start=1):
-            normalized = dict(question)
+            normalized = dict(question or {})
             normalized["id"] = str(normalized.get("id", f"Q{index:03d}"))
-            normalized["question_type"] = self._normalize_question_type(normalized.get("question_type"))
-            normalized["difficulty"] = self._normalize_difficulty(normalized.get("difficulty"))
+            normalized["question_type"] = QuestionType.normalize(normalized.get("question_type"))
+            normalized["difficulty"] = Difficulty.normalize(normalized.get("difficulty"))
 
-            answer = normalized.get("correct_answer", [])
-            if isinstance(answer, list):
-                normalized["correct_answer"] = [str(item) for item in answer]
-            elif answer is None:
-                normalized["correct_answer"] = []
-            else:
-                normalized["correct_answer"] = [str(answer)]
+            ans = normalized.get("correct_answer", [])
+            normalized["correct_answer"] = [str(a) for a in ans] if isinstance(ans, list) else [str(ans)]
 
-            options = normalized.get("options", [])
-            if isinstance(options, list):
-                normalized["options"] = [str(item) for item in options]
-            elif options is None:
-                normalized["options"] = []
-            else:
-                normalized["options"] = [str(options)]
+            opts = normalized.get("options", [])
+            normalized["options"] = [str(o) for o in opts] if isinstance(opts, list) else ([str(opts)] if opts else [])
 
             tags = normalized.get("knowledge_tags", [])
             refs = normalized.get("reference_points", [])
-            normalized["knowledge_tags"] = [str(item) for item in tags] if isinstance(tags, list) else [str(tags)]
-            normalized["reference_points"] = [str(item) for item in refs] if isinstance(refs, list) else [str(refs)]
+            normalized["knowledge_tags"] = [str(t) for t in tags] if isinstance(tags, list) else [str(tags)]
+            normalized["reference_points"] = [str(r) for r in refs] if isinstance(refs, list) else [str(refs)]
             normalized["prompt"] = str(normalized.get("prompt", ""))
             normalized["explanation"] = str(normalized.get("explanation", ""))
             questions.append(normalized)
@@ -316,27 +359,3 @@ class LangChainQuizProvider:
             "source_summary": str(data.get("source_summary", fallback_title)),
             "questions": questions,
         }
-
-    def _normalize_question_type(self, raw: object) -> str:
-        value = str(raw or "单选题")
-        aliases = {
-            "单选": "单选题",
-            "单项选择题": "单选题",
-            "多选": "多选题",
-            "多项选择题": "多选题",
-            "填空": "填空题",
-            "简答": "简答题",
-            "判断": "判断题",
-        }
-        return aliases.get(value, value)
-
-    def _normalize_difficulty(self, raw: object) -> str:
-        value = str(raw or "中等")
-        aliases = {
-            "容易": "简单",
-            "简单题": "简单",
-            "普通": "中等",
-            "中等题": "中等",
-            "困难题": "困难",
-        }
-        return aliases.get(value, value)
