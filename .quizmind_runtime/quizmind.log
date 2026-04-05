@@ -1,0 +1,116 @@
+2026-04-04 23:23:16,935 | INFO | quizmind | {"event": "embedding.provider", "provider": "remote", "model": "Qwen/Qwen3-Embedding-8B"}
+2026-04-04 23:23:18,112 | INFO | quizmind | {"event": "memory.load_store.start"}
+2026-04-04 23:23:18,985 | INFO | quizmind | {"event": "memory.load_store.success", "duration_ms": 872.75}
+2026-04-04 23:23:18,985 | INFO | quizmind | {"event": "service.parse_content.start", "source_type": "text"}
+2026-04-04 23:23:18,985 | INFO | quizmind | {"event": "llm.cache_miss", "operation": "parse_content", "key": "parse_content_b8164847c7768bf98be2dbe0f85d83e8c5d4f7d57ab8198e024704c8023db1fe"}
+2026-04-04 23:23:18,986 | INFO | quizmind | {"event": "llm.invoke.start", "operation": "parse_content", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-04 23:24:09,699 | INFO | quizmind | {"event": "llm.invoke.success", "duration_ms": 50713.36, "operation": "parse_content", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-04 23:24:09,700 | INFO | quizmind | {"event": "parse_content.fallback", "reason": "invalid literal for int() with base 10: '高'"}
+2026-04-04 23:24:09,701 | INFO | quizmind | {"event": "service.parse_content.success", "duration_ms": 50715.84, "source_type": "text"}
+2026-04-04 23:24:09,701 | INFO | quizmind | {"event": "service.generate_from_source.start", "source_type": "text"}
+2026-04-04 23:24:09,701 | INFO | quizmind | {"event": "llm.cache_miss", "operation": "generate_quiz_from_source", "key": "generate_quiz_from_source_6e0b647b70b0e99d00309224dcfe58078f359cd15d6177a62870d817a8fbe0af"}
+2026-04-04 23:24:09,702 | INFO | quizmind | {"event": "llm.invoke.start", "operation": "generate_quiz_from_source", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-04 23:25:08,564 | INFO | quizmind | {"event": "llm.invoke.success", "duration_ms": 58862.55, "operation": "generate_quiz_from_source", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-04 23:25:08,565 | INFO | quizmind | {"event": "service.generate_from_source.error", "duration_ms": 58863.93, "error": "'str' object has no attribute 'get'", "source_type": "text"}
+2026-04-04 23:26:45,624 | INFO | quizmind | {"event": "embedding.provider", "provider": "remote", "model": "Qwen/Qwen3-Embedding-8B"}
+2026-04-04 23:26:46,809 | INFO | quizmind | {"event": "memory.load_store.start"}
+2026-04-04 23:26:52,748 | INFO | quizmind | {"event": "memory.load_store.success", "duration_ms": 5938.64}
+2026-04-04 23:26:52,749 | INFO | quizmind | {"event": "service.parse_content.start", "source_type": "text"}
+2026-04-04 23:26:52,759 | INFO | quizmind | {"event": "llm.cache_hit", "operation": "parse_content", "key": "parse_content_b8164847c7768bf98be2dbe0f85d83e8c5d4f7d57ab8198e024704c8023db1fe"}
+2026-04-04 23:26:52,759 | INFO | quizmind | {"event": "parse_content.fallback", "reason": "invalid literal for int() with base 10: '高'"}
+2026-04-04 23:26:52,761 | INFO | quizmind | {"event": "service.parse_content.success", "duration_ms": 11.95, "source_type": "text"}
+2026-04-04 23:26:52,761 | INFO | quizmind | {"event": "service.generate_from_source.start", "source_type": "text"}
+2026-04-04 23:26:52,769 | INFO | quizmind | {"event": "llm.cache_hit", "operation": "generate_quiz_from_source", "key": "generate_quiz_from_source_6e0b647b70b0e99d00309224dcfe58078f359cd15d6177a62870d817a8fbe0af"}
+2026-04-04 23:26:52,769 | INFO | quizmind | {"event": "service.generate_from_source.success", "duration_ms": 8.65, "source_type": "text"}
+2026-04-04 23:26:52,770 | INFO | quizmind | {"event": "memory.add_content.start", "title": "Python生成器与yield关键字", "segments": 2}
+2026-04-04 23:26:57,848 | INFO | quizmind | {"event": "memory.save.start"}
+2026-04-04 23:26:57,849 | INFO | quizmind | {"event": "memory.save.success", "duration_ms": 1.11}
+2026-04-04 23:26:57,850 | INFO | quizmind | {"event": "memory.add_content.success", "duration_ms": 5080.27, "title": "Python生成器与yield关键字", "segments": 2}
+2026-04-04 23:26:57,850 | INFO | quizmind | {"event": "memory.build_content.start", "query": "Python ???", "top_k": 3}
+2026-04-04 23:26:57,850 | INFO | quizmind | {"event": "memory.retrieve.start", "query": "Python ???", "top_k": 3}
+2026-04-04 23:27:01,039 | INFO | quizmind | {"event": "memory.retrieve.success", "duration_ms": 3188.79, "query": "Python ???", "top_k": 3}
+2026-04-04 23:27:01,039 | INFO | quizmind | {"event": "memory.build_content.success", "duration_ms": 3189.26, "query": "Python ???", "top_k": 3}
+2026-04-04 23:27:01,039 | INFO | quizmind | {"event": "service.generate_quiz.start", "title": "yield关键字的作用和用法生成器的基本概念", "question_count": 6}
+2026-04-04 23:27:01,040 | INFO | quizmind | {"event": "llm.cache_miss", "operation": "generate_quiz", "key": "generate_quiz_aac7bae3bb0ec9ec5ab89e994423952a515f31c44983435b7695e54c419991b2"}
+2026-04-04 23:27:01,040 | INFO | quizmind | {"event": "llm.invoke.start", "operation": "generate_quiz", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-04 23:28:18,727 | INFO | quizmind | {"event": "llm.invoke.success", "duration_ms": 77687.4, "operation": "generate_quiz", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-04 23:28:18,730 | INFO | quizmind | {"event": "service.generate_quiz.success", "duration_ms": 77690.13, "title": "yield关键字的作用和用法生成器的基本概念", "question_count": 6}
+2026-04-04 23:28:18,730 | INFO | quizmind | {"event": "service.grade.start", "quiz_title": "yield关键字的作用和用法生成器的基本概念", "answers": 6}
+2026-04-04 23:28:18,730 | INFO | quizmind | {"event": "llm.cache_miss", "operation": "grade_subjective_batch", "key": "grade_subjective_batch_ac8fe068ebcc3c1d696afd102d1a5ada5cbfe572638fca0d2a6dc5727335c5aa"}
+2026-04-04 23:28:18,731 | INFO | quizmind | {"event": "llm.invoke.start", "operation": "grade_subjective_batch", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-04 23:28:59,259 | INFO | quizmind | {"event": "llm.invoke.success", "duration_ms": 40527.79, "operation": "grade_subjective_batch", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-04 23:28:59,260 | INFO | quizmind | {"event": "service.grade.subjective_batch", "question_count": 1, "llm_graded": 1}
+2026-04-04 23:28:59,260 | INFO | quizmind | {"event": "service.grade.success", "duration_ms": 40530.01, "quiz_title": "yield关键字的作用和用法生成器的基本概念", "answers": 6}
+2026-04-05 00:13:17,283 | INFO | quizmind | {"event": "embedding.provider", "provider": "remote", "model": "Qwen/Qwen3-Embedding-8B"}
+2026-04-05 00:13:18,461 | INFO | quizmind | {"event": "memory.load_store.start"}
+2026-04-05 00:13:18,543 | INFO | quizmind | {"event": "memory.load_store.success", "duration_ms": 82.06}
+2026-04-05 00:13:18,544 | INFO | quizmind | {"event": "service.parse_content.start", "source_type": "text"}
+2026-04-05 00:13:18,544 | INFO | quizmind | {"event": "llm.cache_hit", "operation": "parse_content", "key": "parse_content_b8164847c7768bf98be2dbe0f85d83e8c5d4f7d57ab8198e024704c8023db1fe"}
+2026-04-05 00:13:18,544 | INFO | quizmind | {"event": "parse_content.fallback", "reason": "invalid literal for int() with base 10: '高'"}
+2026-04-05 00:13:18,545 | INFO | quizmind | {"event": "content.fallback_parse.start", "source_type": "text"}
+2026-04-05 00:13:18,546 | INFO | quizmind | {"event": "content.fallback_parse.success", "duration_ms": 1.05, "source_type": "text"}
+2026-04-05 00:13:18,546 | INFO | quizmind | {"event": "service.parse_content.success", "duration_ms": 1.8, "source_type": "text"}
+2026-04-05 00:13:18,546 | INFO | quizmind | {"event": "service.generate_from_source.start", "source_type": "text"}
+2026-04-05 00:13:18,546 | INFO | quizmind | {"event": "llm.cache_hit", "operation": "generate_quiz_from_source", "key": "generate_quiz_from_source_6e0b647b70b0e99d00309224dcfe58078f359cd15d6177a62870d817a8fbe0af"}
+2026-04-05 00:13:18,547 | INFO | quizmind | {"event": "service.generate_from_source.success", "duration_ms": 0.62, "source_type": "text"}
+2026-04-05 00:13:18,547 | INFO | quizmind | {"event": "memory.add_content.start", "title": "Python生成器与yield关键字", "segments": 2}
+2026-04-05 00:13:37,940 | INFO | quizmind | {"event": "memory.save.start"}
+2026-04-05 00:13:37,941 | INFO | quizmind | {"event": "memory.save.success", "duration_ms": 0.91}
+2026-04-05 00:13:37,948 | INFO | quizmind | {"event": "memory.add_content.success", "duration_ms": 19400.81, "title": "Python生成器与yield关键字", "segments": 2}
+2026-04-05 00:13:37,948 | INFO | quizmind | {"event": "memory.build_content.start", "query": "Python ???", "top_k": 3}
+2026-04-05 00:13:37,948 | INFO | quizmind | {"event": "memory.retrieve.start", "query": "Python ???", "top_k": 3}
+2026-04-05 00:13:38,214 | INFO | quizmind | {"event": "memory.retrieve.success", "duration_ms": 265.55, "query": "Python ???", "top_k": 3}
+2026-04-05 00:13:38,214 | INFO | quizmind | {"event": "content.fallback_parse.start", "source_type": "memory"}
+2026-04-05 00:13:38,214 | INFO | quizmind | {"event": "content.fallback_parse.success", "duration_ms": 0.18, "source_type": "memory"}
+2026-04-05 00:13:38,214 | INFO | quizmind | {"event": "memory.build_content.success", "duration_ms": 266.35, "query": "Python ???", "top_k": 3}
+2026-04-05 00:13:38,214 | INFO | quizmind | {"event": "service.generate_quiz.start", "title": "生成器的基本概念生成器的基本概念", "question_count": 6}
+2026-04-05 00:13:38,215 | INFO | quizmind | {"event": "llm.cache_miss", "operation": "generate_quiz", "key": "generate_quiz_6594e930c8191c9dcc31ce3de0fe5b3a527e439867b1414aa3aa92196d4f7e34"}
+2026-04-05 00:13:38,215 | INFO | quizmind | {"event": "llm.invoke.start", "operation": "generate_quiz", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:14:32,784 | INFO | quizmind | {"event": "llm.invoke.success", "duration_ms": 54568.58, "operation": "generate_quiz", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:14:32,784 | INFO | quizmind | {"event": "service.generate_quiz.success", "duration_ms": 54570.06, "title": "生成器的基本概念生成器的基本概念", "question_count": 6}
+2026-04-05 00:14:32,785 | INFO | quizmind | {"event": "service.grade.start", "quiz_title": "生成器的基本概念", "answers": 6}
+2026-04-05 00:14:32,785 | INFO | quizmind | {"event": "llm.cache_miss", "operation": "grade_subjective_batch", "key": "grade_subjective_batch_fc29a710d5f9a6df8586d744fbc4bf5f72872adbf29262703177661f67db89db"}
+2026-04-05 00:14:32,785 | INFO | quizmind | {"event": "llm.invoke.start", "operation": "grade_subjective_batch", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:14:58,941 | INFO | quizmind | {"event": "llm.invoke.success", "duration_ms": 26155.9, "operation": "grade_subjective_batch", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:14:58,942 | INFO | quizmind | {"event": "service.grade.subjective_batch", "question_count": 1, "llm_graded": 1}
+2026-04-05 00:14:58,942 | INFO | quizmind | {"event": "service.grade.success", "duration_ms": 26157.4, "quiz_title": "生成器的基本概念", "answers": 6}
+2026-04-05 00:15:13,765 | INFO | quizmind | {"event": "embedding.provider", "provider": "remote", "model": "Qwen/Qwen3-Embedding-8B"}
+2026-04-05 00:15:14,937 | INFO | quizmind | {"event": "memory.load_store.start"}
+2026-04-05 00:15:15,029 | INFO | quizmind | {"event": "memory.load_store.success", "duration_ms": 91.74}
+2026-04-05 00:15:15,029 | INFO | quizmind | {"event": "service.generate_from_source.start", "source_type": "text"}
+2026-04-05 00:15:15,029 | INFO | quizmind | {"event": "llm.cache_miss", "operation": "generate_quiz_from_source", "key": "generate_quiz_from_source_7e91bd3321ec18ee3ddb28a207c46656cd048430e800fae45db3d60a73d670b9"}
+2026-04-05 00:15:15,030 | INFO | quizmind | {"event": "llm.invoke.start", "operation": "generate_quiz_from_source", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:16:13,169 | INFO | quizmind | {"event": "llm.invoke.success", "duration_ms": 58139.28, "operation": "generate_quiz_from_source", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:16:13,170 | INFO | quizmind | {"event": "service.generate_from_source.success", "duration_ms": 58141.37, "source_type": "text"}
+2026-04-05 00:16:13,171 | INFO | quizmind | {"event": "service.generate_from_source.start", "source_type": "text"}
+2026-04-05 00:16:13,178 | INFO | quizmind | {"event": "llm.cache_hit", "operation": "generate_quiz_from_source", "key": "generate_quiz_from_source_7e91bd3321ec18ee3ddb28a207c46656cd048430e800fae45db3d60a73d670b9"}
+2026-04-05 00:16:13,179 | INFO | quizmind | {"event": "service.generate_from_source.success", "duration_ms": 7.96, "source_type": "text"}
+2026-04-05 00:23:31,240 | INFO | quizmind | {"event": "embedding.provider", "provider": "remote", "model": "Qwen/Qwen3-Embedding-8B"}
+2026-04-05 00:23:32,233 | INFO | quizmind | {"event": "memory.load_store.start"}
+2026-04-05 00:23:32,474 | INFO | quizmind | {"event": "memory.load_store.success", "duration_ms": 241.69}
+2026-04-05 00:24:13,963 | INFO | quizmind | {"event": "embedding.provider", "provider": "remote", "model": "Qwen/Qwen3-Embedding-8B"}
+2026-04-05 00:24:15,667 | INFO | quizmind | {"event": "memory.load_store.start"}
+2026-04-05 00:24:15,706 | INFO | quizmind | {"event": "memory.load_store.success", "duration_ms": 39.01}
+2026-04-05 00:24:46,197 | INFO | quizmind | {"event": "service.parse_content.start", "source_type": "text"}
+2026-04-05 00:24:46,197 | INFO | quizmind | {"event": "llm.cache_miss", "operation": "parse_content", "key": "parse_content_1df2de07c41bf21458bce49eae157e8ef99d8deeed3ef597a92353bf89729761"}
+2026-04-05 00:24:46,198 | INFO | quizmind | {"event": "llm.invoke.start", "operation": "parse_content", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:26:51,197 | INFO | quizmind | {"event": "llm.invoke.success", "duration_ms": 124998.67, "operation": "parse_content", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:26:51,199 | INFO | quizmind | {"event": "parse_content.fallback", "reason": "invalid literal for int() with base 10: '高'"}
+2026-04-05 00:26:51,199 | INFO | quizmind | {"event": "content.fallback_parse.start", "source_type": "text"}
+2026-04-05 00:26:51,201 | INFO | quizmind | {"event": "content.fallback_parse.success", "duration_ms": 2.04, "source_type": "text"}
+2026-04-05 00:26:51,201 | INFO | quizmind | {"event": "service.parse_content.success", "duration_ms": 125004.47, "source_type": "text"}
+2026-04-05 00:28:31,024 | INFO | quizmind | {"event": "memory.add_content.start", "title": "第 5 章：日志系统与数据恢复在开始本章之前，你需要先在脑海", "segments": 8}
+2026-04-05 00:28:50,889 | INFO | quizmind | {"event": "memory.save.start"}
+2026-04-05 00:28:50,890 | INFO | quizmind | {"event": "memory.save.success", "duration_ms": 1.25}
+2026-04-05 00:28:50,897 | INFO | quizmind | {"event": "memory.add_content.success", "duration_ms": 19873.08, "title": "第 5 章：日志系统与数据恢复在开始本章之前，你需要先在脑海", "segments": 8}
+2026-04-05 00:28:59,127 | INFO | quizmind | {"event": "service.generate_quiz.start", "title": "第 5 章：日志系统与数据恢复在开始本章之前，你需要先在脑海", "question_count": 10}
+2026-04-05 00:28:59,127 | INFO | quizmind | {"event": "llm.cache_miss", "operation": "generate_quiz", "key": "generate_quiz_1da935a8967c9ae5953e28b92a31bf59c6f49304da0999a5e207f620d90d1f92"}
+2026-04-05 00:28:59,128 | INFO | quizmind | {"event": "llm.invoke.start", "operation": "generate_quiz", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:30:01,602 | INFO | quizmind | {"event": "llm.invoke.success", "duration_ms": 62473.76, "operation": "generate_quiz", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:30:01,603 | INFO | quizmind | {"event": "service.generate_quiz.success", "duration_ms": 62477.05, "title": "第 5 章：日志系统与数据恢复在开始本章之前，你需要先在脑海", "question_count": 10}
+2026-04-05 00:30:37,251 | INFO | quizmind | {"event": "service.grade.start", "quiz_title": "第 5 章：日志系统与数据恢复", "answers": 10}
+2026-04-05 00:30:37,251 | INFO | quizmind | {"event": "llm.cache_miss", "operation": "grade_subjective_batch", "key": "grade_subjective_batch_45fefb90775db5c1c92403b9dd7ad41cf4cf308cb4ad807688a59bd9bbd487c0"}
+2026-04-05 00:30:37,252 | INFO | quizmind | {"event": "llm.invoke.start", "operation": "grade_subjective_batch", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:31:02,247 | INFO | quizmind | {"event": "llm.invoke.success", "duration_ms": 24995.04, "operation": "grade_subjective_batch", "model": "Pro/deepseek-ai/DeepSeek-V3.2"}
+2026-04-05 00:31:02,248 | INFO | quizmind | {"event": "service.grade.subjective_batch", "question_count": 2, "llm_graded": 2}
+2026-04-05 00:31:02,249 | INFO | quizmind | {"event": "service.grade.success", "duration_ms": 24998.52, "quiz_title": "第 5 章：日志系统与数据恢复", "answers": 10}

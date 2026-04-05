@@ -1,0 +1,139 @@
+{
+  "parsed_content": {
+    "title": "Python生成器与yield关键字",
+    "source_type": "text",
+    "cleaned_text": "Python中的生成器是一种特殊的迭代器，使用yield关键字定义。yield用于在函数中返回一个值并暂停函数执行，下次从暂停处继续。",
+    "segments": [
+      "生成器的基本概念",
+      "yield关键字的作用和用法"
+    ],
+    "knowledge_points": [
+      "生成器的定义和特性",
+      "yield关键字在生成器函数中的使用",
+      "生成器与普通迭代器的区别"
+    ],
+    "concepts": [
+      "生成器",
+      "yield",
+      "迭代器"
+    ]
+  },
+  "quiz": {
+    "title": "Python生成器知识测验",
+    "source_summary": "本文介绍了Python中生成器的概念和yield关键字的使用，包括其工作原理和优势。",
+    "questions": [
+      {
+        "id": 1,
+        "question_type": "单选题",
+        "prompt": "Python中，yield关键字主要用于什么？",
+        "options": [
+          "定义类",
+          "定义生成器函数",
+          "定义普通函数",
+          "定义变量"
+        ],
+        "correct_answer": "B",
+        "explanation": "yield关键字用于定义生成器函数，使函数能够返回一个值并暂停执行，下次调用时从暂停处继续。",
+        "knowledge_tags": [
+          "yield",
+          "生成器定义"
+        ],
+        "difficulty": "简单",
+        "reference_points": [
+          "yield关键字的作用"
+        ]
+      },
+      {
+        "id": 2,
+        "question_type": "单选题",
+        "prompt": "生成器函数与普通函数的主要区别是什么？",
+        "options": [
+          "生成器函数使用return语句",
+          "生成器函数使用yield语句",
+          "生成器函数不能有参数",
+          "生成器函数必须用lambda定义"
+        ],
+        "correct_answer": "B",
+        "explanation": "生成器函数使用yield语句返回值并暂停执行，而普通函数使用return语句返回值后立即结束执行。",
+        "knowledge_tags": [
+          "生成器函数",
+          "yield"
+        ],
+        "difficulty": "中等",
+        "reference_points": [
+          "yield关键字的作用和用法"
+        ]
+      },
+      {
+        "id": 3,
+        "question_type": "多选题",
+        "prompt": "以下关于生成器的说法，哪些是正确的？",
+        "options": [
+          "生成器是一种迭代器",
+          "生成器可以节省内存",
+          "生成器函数只能包含一个yield语句",
+          "生成器可以使用next()函数获取值"
+        ],
+        "correct_answer": [
+          "A",
+          "B",
+          "D"
+        ],
+        "explanation": "生成器实现了迭代器协议，因此是迭代器；它惰性生成值，节省内存；可以使用next()函数逐步获取值；生成器函数可以包含多个yield语句。",
+        "knowledge_tags": [
+          "生成器特性",
+          "迭代器"
+        ],
+        "difficulty": "中等",
+        "reference_points": [
+          "生成器的定义和特性"
+        ]
+      },
+      {
+        "id": 4,
+        "question_type": "填空题",
+        "prompt": "在Python中，使用______关键字定义生成器函数。",
+        "options": [],
+        "correct_answer": "yield",
+        "explanation": "yield关键字使函数成为生成器函数，允许在函数中暂停和恢复执行。",
+        "knowledge_tags": [
+          "yield"
+        ],
+        "difficulty": "困难",
+        "reference_points": [
+          "yield关键字的作用和用法"
+        ]
+      },
+      {
+        "id": 5,
+        "question_type": "简答题",
+        "prompt": "简要解释生成器的工作原理。",
+        "options": [],
+        "correct_answer": "生成器函数使用yield关键字返回值并暂停执行，下次调用时从暂停处继续执行，直到遇到下一个yield或函数结束，从而实现惰性值生成。",
+        "explanation": "这种机制允许高效处理大量数据，因为值在需要时才生成，节省内存。",
+        "knowledge_tags": [
+          "生成器工作原理"
+        ],
+        "difficulty": "中等",
+        "reference_points": [
+          "生成器的基本概念"
+        ]
+      },
+      {
+        "id": 6,
+        "question_type": "判断题",
+        "prompt": "生成器函数必须使用yield关键字。",
+        "options": [],
+        "correct_answer": "正确",
+        "explanation": "是的，生成器函数通过yield关键字定义，否则就是普通函数。",
+        "knowledge_tags": [
+          "生成器定义"
+        ],
+        "difficulty": "简单",
+        "reference_points": [
+          "生成器的定义和特性"
+        ]
+      }
+    ]
+  }
+}

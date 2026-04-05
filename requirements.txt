@@ -1,0 +1,12 @@
+streamlit>=1.44.0
+langchain>=0.3.23
+langchain-community>=0.3.21
+langchain-openai>=0.3.14
+openai>=1.75.0
+pydantic>=2.10.0
+python-dotenv>=1.0.1
+requests>=2.32.0
+beautifulsoup4>=4.12.3
+pypdf>=5.4.0
+python-docx>=1.1.2
+faiss-cpu>=1.8.0

@@ -1,0 +1,1 @@
+"""QuizMind package."""
