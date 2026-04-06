@@ -50,7 +50,9 @@ class MemoryStore:
         from os import getenv
 
         api_key = getenv("SILICONFLOW_API_KEY") or getenv("OPENAI_API_KEY")
-        embedding_model = getenv("SILICONFLOW_EMBEDDING_MODEL", "").strip()
+        embedding_model = getenv(
+            "SILICONFLOW_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B"
+        ).strip()
         base_url = getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
         if api_key and embedding_model:
             log_event("embedding.provider", provider="remote", model=embedding_model)
@@ -81,7 +83,9 @@ class MemoryStore:
             self.store.save_local(str(self.index_dir))
 
     def add_parsed_content(self, parsed: ParsedContent) -> MemorySnapshot:
-        with timed_event("memory.add_content", title=parsed.title, segments=len(parsed.segments)):
+        with timed_event(
+            "memory.add_content", title=parsed.title, segments=len(parsed.segments)
+        ):
             documents = [
                 Document(
                     page_content=segment,
@@ -110,7 +114,9 @@ class MemoryStore:
         entries = self.list_snapshots()
         entries.append(snapshot)
         self.meta_file.write_text(
-            json.dumps([entry.model_dump() for entry in entries], ensure_ascii=False, indent=2),
+            json.dumps(
+                [entry.model_dump() for entry in entries], ensure_ascii=False, indent=2
+            ),
             encoding="utf-8",
         )
 
@@ -124,7 +130,9 @@ class MemoryStore:
         with timed_event("memory.build_content", query=query, top_k=top_k):
             documents = self.retrieve(query=query, top_k=top_k)
             if not documents:
-                raise ValueError("Memory store is empty. Save some parsed content first.")
+                raise ValueError(
+                    "Memory store is empty. Save some parsed content first."
+                )
             sample_size = min(len(documents), max(2, min(top_k, len(documents))))
             selected = random.sample(documents, k=sample_size)
             merged_text = "\n".join(doc.page_content for doc in selected)

@@ -48,6 +48,10 @@ class Difficulty(str, Enum):
 
     @classmethod
     def normalize(cls, raw: object) -> str:
+        if isinstance(raw, cls):
+            return raw.value
+        if isinstance(raw, Enum):
+            raw = raw.value
         return DIFFICULTY_ALIASES.get(str(raw or "").strip().lower(), "medium")
 
 
@@ -60,7 +64,13 @@ class QuestionType(str, Enum):
 
     @classmethod
     def normalize(cls, raw: object) -> str:
+        if isinstance(raw, cls):
+            return raw.value
+        if isinstance(raw, Enum):
+            raw = raw.value
         value = str(raw or "").strip().lower()
+        if "." in value:
+            value = value.split(".")[-1]
         return QUESTION_TYPE_ALIASES.get(value, "single_choice")
 
 

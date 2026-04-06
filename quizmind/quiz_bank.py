@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +20,9 @@ class QuizBank:
         self.index_file = self.root / "index.json"
 
     def build_signature(self, source: str, source_type: str, config: QuizConfig) -> str:
+        signature_version = os.getenv("QUIZMIND_SIGNATURE_VERSION", "2")
         payload = {
+            "signature_version": signature_version,
             "source_type": source_type,
             "source": source.strip(),
             "config": config.model_dump(),
@@ -165,4 +168,3 @@ class QuizBank:
             json.dumps(index, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-

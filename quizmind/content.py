@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -13,6 +14,10 @@ from pypdf import PdfReader
 
 from quizmind.logger import timed_event
 from quizmind.models import Difficulty, KnowledgePoint, ParsedContent
+
+MAX_SEGMENTS = max(20, int(os.getenv("QUIZMIND_MAX_SEGMENTS", "200")))
+MAX_KNOWLEDGE_POINTS = max(6, int(os.getenv("QUIZMIND_MAX_KNOWLEDGE_POINTS", "24")))
+SEGMENT_MAX_LEN = max(120, int(os.getenv("QUIZMIND_SEGMENT_MAX_LEN", "1200")))
 
 
 STOP_WORDS = {
@@ -79,7 +84,7 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
-def split_segments(text: str, max_len: int = 260) -> List[str]:
+def split_segments(text: str, max_len: int = SEGMENT_MAX_LEN) -> List[str]:
     raw_segments = re.split(r"\n+|(?<=[.!?。！？])", text)
     segments: List[str] = []
     buf = ""
@@ -95,7 +100,7 @@ def split_segments(text: str, max_len: int = 260) -> List[str]:
             buf = clean
     if buf:
         segments.append(buf)
-    return segments[:50]
+    return segments[:MAX_SEGMENTS]
 
 
 def extract_keywords(text: str, limit: int = 15) -> List[str]:
@@ -125,7 +130,7 @@ def build_knowledge_points(segments: Iterable[str], keywords: List[str]) -> List
         points.append(
             KnowledgePoint(
                 name=point_name,
-                summary=segment[:180],
+                summary=segment,
                 importance=max(1, min(5, len(local_keywords) + 1)),
                 difficulty=infer_difficulty(segment),
                 keywords=local_keywords,
@@ -139,7 +144,7 @@ def build_knowledge_points(segments: Iterable[str], keywords: List[str]) -> List
             continue
         deduped.append(point)
         seen.add(point.name)
-    return deduped[:12]
+    return deduped[:MAX_KNOWLEDGE_POINTS]
 
 
 def fallback_parse_content(source: str, source_type: str) -> ParsedContent:
@@ -148,7 +153,8 @@ def fallback_parse_content(source: str, source_type: str) -> ParsedContent:
         segments = split_segments(cleaned)
         keywords = extract_keywords(cleaned)
         knowledge_points = build_knowledge_points(segments, keywords)
-        title = (segments[0][:50] if segments else "untitled_content").strip()
+        first_line = next((line.strip() for line in cleaned.split("\n") if line.strip()), "")
+        title = (first_line[:120] if first_line else (segments[0][:120] if segments else "untitled_content")).strip()
         return ParsedContent(
             title=title,
             source_type=source_type,  # type: ignore[arg-type]

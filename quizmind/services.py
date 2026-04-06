@@ -150,6 +150,106 @@ class QuizEngine:
         self.memory_store = MemoryStore()
         self.quiz_bank = QuizBank()
 
+    def _repair_quiz(self, parsed: ParsedContent, quiz: Quiz, config: QuizConfig) -> Quiz:
+        if not quiz or not isinstance(getattr(quiz, "questions", None), list):
+            return self._generate_locally(parsed, config)
+
+        sanitized_questions: list[Question] = []
+        used_ids: set[str] = set()
+        for idx, question in enumerate(quiz.questions, start=1):
+            repaired = self._repair_question(question, idx)
+            if repaired.id in used_ids:
+                repaired = repaired.model_copy(update={"id": f"{repaired.id}_{idx}"})
+            used_ids.add(repaired.id)
+            sanitized_questions.append(repaired)
+
+        if not sanitized_questions:
+            return self._generate_locally(parsed, config)
+
+        repaired_quiz = Quiz(
+            title=(quiz.title or f"{parsed.title} - 智能练习").strip(),
+            source_summary=(quiz.source_summary or parsed.title).strip(),
+            questions=sanitized_questions,
+        )
+
+        should_pad = len(repaired_quiz.questions) < config.question_count
+        should_pad = should_pad or (not self._quiz_matches_type_targets(repaired_quiz, config))
+        if not should_pad:
+            return repaired_quiz.model_copy(update={"questions": repaired_quiz.questions[: config.question_count]})
+
+        filler = self._generate_locally(parsed, config).questions
+        existing_ids = {q.id for q in repaired_quiz.questions}
+        merged = list(repaired_quiz.questions)
+        for item in filler:
+            if len(merged) >= config.question_count:
+                break
+            if item.id in existing_ids:
+                continue
+            merged.append(item)
+            existing_ids.add(item.id)
+
+        return repaired_quiz.model_copy(update={"questions": merged[: config.question_count]})
+
+    def _repair_question(self, question: Question, index: int) -> Question:
+        data = question.model_dump()
+        qtype = QuestionType.normalize(data.get("question_type"))
+        data["question_type"] = qtype
+
+        qid = str(data.get("id", "")).strip() or f"Q{index:03d}"
+        data["id"] = qid
+
+        prompt = str(data.get("prompt", "")).strip()
+        if not prompt:
+            tags = data.get("knowledge_tags") or []
+            fallback_topic = str(tags[0]).strip() if tags else qid
+            data["prompt"] = f"请回答与“{fallback_topic}”相关的问题。"
+        else:
+            data["prompt"] = prompt
+
+        options = data.get("options") or []
+        if not isinstance(options, list):
+            options = [str(options)]
+        options = [str(opt).strip() for opt in options if str(opt).strip()]
+
+        correct_answer = data.get("correct_answer") or []
+        if not isinstance(correct_answer, list):
+            correct_answer = [str(correct_answer)]
+        correct_answer = [str(ans).strip() for ans in correct_answer if str(ans).strip()]
+
+        if qtype == QuestionType.true_false.value:
+            if set(options) != {"正确", "错误"}:
+                options = ["正确", "错误"]
+            if not correct_answer or correct_answer[0] not in {"正确", "错误"}:
+                correct_answer = ["正确"]
+        elif qtype in {QuestionType.single_choice.value, QuestionType.multiple_choice.value}:
+            if not options:
+                seed = correct_answer[0] if correct_answer else "选项A"
+                options = [seed, "选项B", "选项C", "选项D"]
+            if not correct_answer:
+                correct_answer = [options[0]]
+        else:
+            if not correct_answer:
+                correct_answer = [str(data.get("explanation", "")).strip() or "（参考答案略）"]
+
+        data["options"] = options
+        data["correct_answer"] = correct_answer
+        data["difficulty"] = Difficulty.normalize(data.get("difficulty"))
+
+        knowledge_tags = data.get("knowledge_tags") or []
+        if not isinstance(knowledge_tags, list):
+            knowledge_tags = [str(knowledge_tags)]
+        knowledge_tags = [str(tag).strip() for tag in knowledge_tags if str(tag).strip()]
+        data["knowledge_tags"] = knowledge_tags or ["untagged"]
+
+        reference_points = data.get("reference_points") or []
+        if not isinstance(reference_points, list):
+            reference_points = [str(reference_points)]
+        data["reference_points"] = [str(item).strip() for item in reference_points if str(item).strip()]
+
+        data["explanation"] = str(data.get("explanation", "")).strip()
+
+        return Question.model_validate(data)
+
     def generate_or_load_from_source(
         self,
         source: str,
@@ -164,8 +264,16 @@ class QuizEngine:
             found = self.quiz_bank.find_by_signature(signature)
             if found:
                 parsed, quiz, item = found
-                log_event("quiz_bank.hit", source_name=source_name, record_id=item.get("id", ""))
-                return parsed, quiz, {"from_saved": True, "record_id": item.get("id", "")}
+                repaired = self._repair_quiz(parsed, quiz, config)
+                if self._quiz_matches_type_targets(repaired, config) and len(repaired.questions) >= config.question_count:
+                    log_event("quiz_bank.hit", source_name=source_name, record_id=item.get("id", ""))
+                    return parsed, repaired, {"from_saved": True, "record_id": item.get("id", "")}
+                log_event(
+                    "quiz_bank.hit_incompatible",
+                    source_name=source_name,
+                    record_id=item.get("id", ""),
+                    reason="question_type_distribution_mismatch",
+                )
 
         if allow_ai_generation:
             parsed, quiz = self.generate_from_source(source, source_type, config)
@@ -175,6 +283,7 @@ class QuizEngine:
             quiz = self._generate_locally(parsed, config)
             used_ai = False
 
+        quiz = self._repair_quiz(parsed, quiz, config)
         record_id = self.quiz_bank.save(
             signature=signature,
             source_name=source_name,
@@ -195,8 +304,8 @@ class QuizEngine:
             if allow_ai_generation:
                 try:
                     llm_quiz = self.provider.generate_quiz(parsed, config)
-                    if llm_quiz:
-                        return llm_quiz
+                    if llm_quiz and llm_quiz.questions:
+                        return self._repair_quiz(parsed, llm_quiz, config)
                 except Exception as exc:
                     log_event("service.generate_quiz.provider_error", title=parsed.title, error=str(exc))
             log_event("service.generate_quiz.fallback_local", title=parsed.title)
@@ -211,8 +320,8 @@ class QuizEngine:
         with timed_event("service.generate_from_source", source_type=source_type):
             try:
                 parsed, quiz = self.provider.generate_quiz_from_source(source, source_type, config)
-                if quiz:
-                    return parsed, quiz
+                if quiz and quiz.questions:
+                    return parsed, self._repair_quiz(parsed, quiz, config)
             except Exception as exc:
                 log_event("service.generate_from_source.provider_error", source_type=source_type, error=str(exc))
             fallback_parsed = fallback_parse_content(source, source_type)
@@ -292,6 +401,14 @@ class QuizEngine:
             questions=questions[: config.question_count],
         )
 
+    def _quiz_matches_type_targets(self, quiz: Quiz, config: QuizConfig) -> bool:
+        targets = self._distribution_targets(config.question_count, config.type_mix)
+        required_types = {name for name, count in targets.items() if count > 0}
+        actual_types = {q.question_type.value for q in quiz.questions}
+        if not required_types:
+            return True
+        return required_types.issubset(actual_types)
+
     def _distribution_targets(self, total: int, mix: Dict[str, int]) -> Dict[str, int]:
         counts = {name: max(0, math.floor(total * ratio / 100)) for name, ratio in mix.items()}
         while sum(counts.values()) < total:
@@ -344,10 +461,14 @@ class QuizEngine:
             )
 
         if question_type == QuestionType.fill_blank:
+            if keyword and keyword in point.summary:
+                blank_prompt = point.summary.replace(keyword, "____", 1)
+            else:
+                blank_prompt = f"{point.name} 的核心关键词是：____。"
             return Question(
                 id=qid,
                 question_type=question_type,
-                prompt=f"填空：{point.summary.replace(keyword, '____', 1)}",
+                prompt=f"填空：{blank_prompt}",
                 correct_answer=[keyword],
                 explanation=f"该空应为“{keyword}”，它是该知识点的关键术语。",
                 knowledge_tags=[point.name],
@@ -356,13 +477,26 @@ class QuizEngine:
             )
 
         if question_type == QuestionType.true_false:
+            false_keyword = distractors[0] if distractors else "无关概念"
+            if keyword and keyword in point.summary:
+                false_statement = point.summary.replace(keyword, false_keyword, 1)
+            else:
+                false_statement = f"{point.name} 的核心关键词是 {false_keyword}。"
+            use_false = (hash(qid) % 2) == 0
+            statement = false_statement if use_false else point.summary
+            answer = "错误" if use_false else "正确"
+            explanation = (
+                f"该陈述故意将关键术语替换为“{false_keyword}”，与原文不一致。"
+                if use_false
+                else "该陈述来自学习内容，因此判断为正确。"
+            )
             return Question(
                 id=qid,
                 question_type=question_type,
-                prompt=f"判断：{point.summary}",
+                prompt=f"判断：{statement}",
                 options=["正确", "错误"],
-                correct_answer=["正确"],
-                explanation="该陈述来自学习内容，因此判断为正确。",
+                correct_answer=[answer],
+                explanation=explanation,
                 knowledge_tags=[point.name],
                 difficulty=difficulty,
                 reference_points=point.keywords,
