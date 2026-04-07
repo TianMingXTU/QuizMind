@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import json
 import re
+import html
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List
@@ -184,12 +185,115 @@ def inject_styles() -> None:
     st.markdown(
         """
         <style>
+        :root {
+            --qm-bg: #0d1117;
+            --qm-surface: #161b22;
+            --qm-surface-muted: #21262d;
+            --qm-border: #30363d;
+            --qm-text: #c9d1d9;
+            --qm-subtle: #8b949e;
+            --qm-brand: #2f81f7;
+            --qm-success: #3fb950;
+            --qm-danger: #f85149;
+            --qm-warning: #d29922;
+        }
+        .stApp {
+            background: var(--qm-bg);
+            color: var(--qm-text);
+        }
+        [data-testid="stSidebar"] {
+            background: var(--qm-surface);
+            border-right: 1px solid var(--qm-border);
+        }
+        [data-testid="stSidebar"] * {
+            color: var(--qm-text);
+        }
+        .qm-page-title {
+            font-size: 28px;
+            line-height: 1.2;
+            font-weight: 800;
+            color: var(--qm-text);
+            margin-bottom: 4px;
+        }
+        .qm-page-subtitle {
+            color: var(--qm-subtle);
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        .qm-section-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--qm-text);
+            margin-bottom: 2px;
+        }
+        .qm-section-subtitle {
+            color: var(--qm-subtle);
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+        div[data-testid="stExpander"] {
+            border: 1px solid var(--qm-border);
+            border-radius: 14px;
+            background: var(--qm-surface);
+        }
+        div[data-testid="stExpander"] summary {
+            font-weight: 700;
+            color: var(--qm-text);
+        }
+        div.stButton > button {
+            border-radius: 10px;
+            border: 1px solid var(--qm-border);
+            background: var(--qm-surface-muted);
+            color: var(--qm-text);
+        }
+        div.stButton > button:hover {
+            border-color: #58a6ff;
+            background: #1f2937;
+        }
+        div[data-testid="stMetric"] {
+            background: var(--qm-surface);
+            border: 1px solid var(--qm-border);
+            border-radius: 10px;
+            padding: 8px 10px;
+        }
+        div[data-testid="stMetric"] * {
+            color: var(--qm-text);
+        }
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {
+            gap: 6px;
+        }
+        div[data-testid="stTabs"] [data-baseweb="tab"] {
+            border: 1px solid var(--qm-border);
+            border-radius: 999px;
+            padding: 4px 12px;
+            background: var(--qm-surface);
+            color: var(--qm-text);
+        }
+        div[data-testid="stTabs"] [aria-selected="true"] {
+            background: #1f6feb22;
+            border-color: #58a6ff;
+            color: #58a6ff;
+        }
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="input"] > div,
+        textarea,
+        input {
+            background: var(--qm-surface-muted) !important;
+            color: var(--qm-text) !important;
+            border-color: var(--qm-border) !important;
+        }
+        .stRadio label, .stCheckbox label, .stSelectbox label, .stTextInput label, .stTextArea label {
+            color: var(--qm-text) !important;
+        }
+        .stCaption, [data-testid="stCaptionContainer"] {
+            color: var(--qm-subtle) !important;
+        }
         .qm-question-card {
-            border: 1px solid #d8e3f0;
+            border: 1px solid var(--qm-border);
             border-radius: 12px;
             padding: 12px 14px;
             margin-bottom: 8px;
-            background: #ffffff;
+            background: var(--qm-surface);
         }
         .qm-question-head {
             display: flex;
@@ -200,7 +304,7 @@ def inject_styles() -> None:
         }
         .qm-question-title {
             font-weight: 700;
-            color: #0f172a;
+            color: var(--qm-text);
         }
         .qm-question-meta {
             display: flex;
@@ -209,15 +313,15 @@ def inject_styles() -> None:
             margin-bottom: 6px;
         }
         .qm-question-prompt {
-            color: #1e293b;
+            color: var(--qm-text);
             line-height: 1.6;
         }
         .qm-question {
-            border: 1px solid #d8e3f0;
+            border: 1px solid var(--qm-border);
             border-radius: 12px;
             padding: 12px;
             margin-bottom: 10px;
-            background: #ffffff;
+            background: var(--qm-surface);
         }
         .qm-chip {
             display: inline-block;
@@ -225,25 +329,26 @@ def inject_styles() -> None:
             margin-bottom: 6px;
             padding: 2px 10px;
             border-radius: 999px;
-            background: #e2e8f0;
-            color: #1e293b;
+            background: #1f2937;
+            color: #79c0ff;
+            border: 1px solid var(--qm-border);
             font-size: 12px;
         }
         .qm-scene-wrap {
-            border: 1px solid #d8e3f0;
+            border: 1px solid var(--qm-border);
             border-radius: 16px;
             padding: 16px;
-            background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+            background: var(--qm-surface);
         }
         .qm-scene-title {
             font-size: 20px;
             font-weight: 700;
-            color: #0f172a;
+            color: var(--qm-text);
             margin-bottom: 4px;
         }
         .qm-scene-subtitle {
             font-size: 13px;
-            color: #475569;
+            color: var(--qm-subtle);
             margin-bottom: 10px;
         }
         [data-testid="stChatMessage"] {
@@ -251,48 +356,65 @@ def inject_styles() -> None:
             padding: 6px 2px;
         }
         .qm-scene-empty {
-            border: 1px dashed #bfd4ea;
+            border: 1px dashed var(--qm-border);
             border-radius: 12px;
-            background: #f8fbff;
+            background: var(--qm-surface-muted);
             padding: 12px;
-            color: #334155;
+            color: var(--qm-text);
         }
         .qm-panel-title {
             font-size: 18px;
             font-weight: 700;
-            color: #0f172a;
+            color: var(--qm-text);
             margin-bottom: 2px;
         }
         .qm-panel-subtitle {
             font-size: 13px;
-            color: #475569;
+            color: var(--qm-subtle);
             margin-bottom: 8px;
         }
         .qm-status-row {
-            border: 1px solid #d8e3f0;
+            border: 1px solid var(--qm-border);
             border-radius: 10px;
-            background: #f8fbff;
+            background: var(--qm-surface-muted);
             padding: 8px 10px;
             margin-bottom: 8px;
-            color: #334155;
+            color: var(--qm-text);
             font-size: 13px;
         }
         .qm-scene-report {
-            border: 1px solid #d8e3f0;
+            border: 1px solid var(--qm-border);
             border-radius: 12px;
-            background: #ffffff;
+            background: var(--qm-surface);
             padding: 10px 12px;
             margin-bottom: 8px;
         }
         .qm-template-hint {
             font-size: 12px;
-            color: #64748b;
+            color: var(--qm-subtle);
             margin-bottom: 6px;
+        }
+        [data-testid="stChatMessage"] {
+            background: var(--qm-surface);
+            border: 1px solid var(--qm-border);
+        }
+        [data-testid="stAlert"] {
+            border-radius: 10px;
+            border: 1px solid var(--qm-border);
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+def render_section_head(title: str, subtitle: str = "") -> None:
+    st.markdown(f'<div class="qm-section-title">{html.escape(title)}</div>', unsafe_allow_html=True)
+    if subtitle:
+        st.markdown(
+            f'<div class="qm-section-subtitle">{html.escape(subtitle)}</div>',
+            unsafe_allow_html=True,
+        )
+
 
 def init_state() -> None:
     defaults = {
@@ -326,10 +448,9 @@ def init_state() -> None:
 
 
 def render_scene_chat_panel(scene_service: SceneInterviewService) -> None:
-    st.markdown('<div class="qm-panel-title">场景模拟 · 工程师拷问</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="qm-panel-subtitle">Chat 模式多轮对话：第一性原理、苏格拉底提问、工程权衡与落地能力。</div>',
-        unsafe_allow_html=True,
+    render_section_head(
+        "场景模拟 · 工程师拷问",
+        "Chat 模式多轮对话：第一性原理、苏格拉底提问、工程权衡与落地能力。",
     )
     presets = {
         "模板：高并发架构": "你是支付系统负责人，日常QPS 5万，促销峰值QPS 30万。请设计整体架构与限流降级方案，并说明核心监控指标。",
@@ -610,11 +731,13 @@ def render_sidebar(
     )
 
     st.sidebar.markdown("### 生成策略")
-    use_saved_first = st.sidebar.checkbox("优先使用已保存题目", value=False, disabled=True)
-    allow_ai_generation = st.sidebar.checkbox("允许 AI 生成新题", value=True, disabled=True)
+    use_saved_first = st.sidebar.checkbox("优先使用已保存题目", value=True)
+    allow_ai_generation = st.sidebar.checkbox("允许 AI 生成新题", value=True)
     enable_interactive_knowledge = st.sidebar.checkbox(
         "启用知识点互动网页（可选）", value=False
     )
+    if not allow_ai_generation:
+        st.sidebar.caption("已关闭 AI 出题：将使用本地规则出题与评测。")
 
     guided_mode = st.sidebar.checkbox("新手引导模式", value=True)
     adaptive_difficulty = st.sidebar.checkbox("启用自适应难度", value=True)
@@ -628,6 +751,8 @@ def render_sidebar(
         memory_top_k = st.sidebar.slider("召回片段数", 2, 8, 4, 1)
         snapshots = engine.list_memory()
         st.sidebar.caption(f"记忆快照数：{len(snapshots)}")
+        if not snapshots:
+            st.sidebar.info("当前记忆库为空，请先在“输入与解析”中保存一次内容。")
         for item in snapshots[-5:]:
             st.sidebar.markdown(f"- {item.title}（{item.chunks} 段）")
 
@@ -983,6 +1108,7 @@ def render_question_widget(
     index: int,
     user_store: UserFeatureStore,
     source_title: str,
+    is_favorited: bool,
 ) -> None:
     key = answer_state_key(question, index)
     qtype = QuestionType.normalize(getattr(question, "question_type", ""))
@@ -991,23 +1117,26 @@ def render_question_widget(
         if not ({"正确", "错误"}.issubset(set(options))):
             options = ["正确", "错误"]
 
-    prompt = (
-        question.prompt or ""
-    ).strip() or "(Missing prompt: please regenerate this question)"
+    prompt = (question.prompt or "").strip() or "(Missing prompt: please regenerate this question)"
     difficulty_value = getattr(question.difficulty, "value", str(question.difficulty))
     tags = question.knowledge_tags[:2] if question.knowledge_tags else ["untagged"]
+    safe_id = html.escape(str(question.id))
+    safe_type = html.escape(qtype_label(question.question_type))
+    safe_diff = html.escape(diff_label(str(difficulty_value)))
+    safe_tags = html.escape("/".join(tags))
+    safe_prompt = html.escape(prompt)
 
     st.markdown(
         f'<div class="qm-question-card">'
-        f'<div class="qm-question-head"><div class="qm-question-title">{question.id} · {qtype_label(question.question_type)}</div></div>'
-        f'<div class="qm-question-meta"><span class="qm-chip">{diff_label(str(difficulty_value))}</span>'
-        f'<span class="qm-chip">{"/".join(tags)}</span></div>'
-        f'<div class="qm-question-prompt">{prompt}</div></div>',
+        f'<div class="qm-question-head"><div class="qm-question-title">{safe_id} · {safe_type}</div></div>'
+        f'<div class="qm-question-meta"><span class="qm-chip">{safe_diff}</span>'
+        f'<span class="qm-chip">{safe_tags}</span></div>'
+        f'<div class="qm-question-prompt">{safe_prompt}</div></div>',
         unsafe_allow_html=True,
     )
     c1, c2 = st.columns([1, 2])
     with c1:
-        if user_store.has_favorite(question):
+        if is_favorited:
             if st.button("取消收藏", key=f"unfav_{key}", width="stretch"):
                 user_store.remove_favorite(user_store.question_fingerprint(question))
                 st.rerun()
@@ -1057,9 +1186,15 @@ def render_question_widget(
 
 def render_all_questions(quiz, user_store: UserFeatureStore) -> None:
     total = len(quiz.questions)
+    answered = answered_count()
     st.progress(
-        answered_count() / max(1, total), text=f"已作答 {answered_count()} / {total}"
+        answered / max(1, total), text=f"已作答 {answered} / {total}"
     )
+    favorite_set = {
+        str(item.get("fingerprint"))
+        for item in user_store.list_favorites()
+        if item.get("fingerprint")
+    }
 
     type_counter: dict[str, int] = {}
     for question in quiz.questions:
@@ -1078,6 +1213,7 @@ def render_all_questions(quiz, user_store: UserFeatureStore) -> None:
                 idx,
                 user_store=user_store,
                 source_title=st.session_state.get("source_name", "当前输入"),
+                is_favorited=user_store.question_fingerprint(question) in favorite_set,
             )
         except Exception as exc:
             log_event(
@@ -1389,8 +1525,11 @@ def main() -> None:
     content_service, engine, grader, scene_service, queue, exporter, user_store = get_services()
     render_sidebar_llm_settings()
 
-    st.title("QuizMind 智能练习与考试系统")
-    st.caption("单页流程：输入解析 -> 自动出题 -> 作答评测 -> 强化训练")
+    st.markdown('<div class="qm-page-title">QuizMind 智能练习与考试系统</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="qm-page-subtitle">单页流程：输入解析 -> 自动出题 -> 作答评测 -> 强化训练</div>',
+        unsafe_allow_html=True,
+    )
     workspace = st.radio(
         "工作区",
         ["智能练习", "场景模拟"],
@@ -1399,8 +1538,7 @@ def main() -> None:
     )
 
     if workspace == "场景模拟":
-        st.markdown("### 场景模拟中心")
-        st.caption("独立实战模块：AI 工程师将持续追问，直到判定你通过。")
+        render_section_head("场景模拟中心", "独立实战模块：AI 工程师将持续追问，直到判定你通过。")
         scene_root = st.container(border=True)
         with scene_root:
             render_scene_chat_panel(scene_service)
@@ -1425,6 +1563,7 @@ def main() -> None:
     st.divider()
 
     with st.expander("1) 输入与解析", expanded=st.session_state.flow_step == 1):
+        render_section_head("输入与解析", "建议先解析再出题，也支持一键解析并出题。")
         if source_mode == "当前内容":
             source_text, source_type = collect_source()
             st.session_state.source_text = source_text
@@ -1507,7 +1646,7 @@ def main() -> None:
         )
 
     with st.expander("2) 组卷", expanded=st.session_state.flow_step == 2):
-        st.caption("当前策略：强制优先使用大模型生成与评估。")
+        render_section_head("组卷", "根据当前配置生成题目，可切换 AI/本地策略。")
         if st.button("生成题目", width="stretch"):
             try:
                 if source_mode == "当前内容":
@@ -1547,6 +1686,9 @@ def main() -> None:
                         st.warning("请先输入学习内容。")
                         return
                 else:
+                    if not engine.list_memory():
+                        st.warning("记忆库为空，请先在“输入与解析”中解析并保存内容。")
+                        return
                     parsed, quiz = engine.generate_from_memory(
                         config=active_config,
                         query=memory_query,
@@ -1570,6 +1712,7 @@ def main() -> None:
                 st.error(f"生成题目失败：{exc}")
 
     with st.expander("3) 作答", expanded=st.session_state.flow_step == 3):
+        render_section_head("作答", "按题型作答后提交，考试模式支持倒计时自动交卷。")
         process_exam_timeout(grader)
         if not st.session_state.quiz:
             st.info("还没有题目，请先完成组卷。")
@@ -1618,6 +1761,7 @@ def main() -> None:
                 st.rerun()
 
     with st.expander("4) 结果复盘", expanded=st.session_state.flow_step == 4):
+        render_section_head("结果复盘", "查看错题与知识点掌握，生成针对性强化训练。")
         log_learning_session_if_needed(user_store)
         render_report()
         if st.session_state.report and st.button("错题重练（变体）", width="stretch"):

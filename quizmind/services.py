@@ -148,8 +148,15 @@ renderQuiz();
 class QuizEngine:
     def __init__(self) -> None:
         self.provider = LangChainQuizProvider()
-        self.memory_store = MemoryStore()
+        self._memory_store: MemoryStore | None = None
         self.quiz_bank = QuizBank()
+
+    @property
+    def memory_store(self) -> MemoryStore:
+        # Lazy initialization to avoid FAISS/embedding setup on every app cold start.
+        if self._memory_store is None:
+            self._memory_store = MemoryStore()
+        return self._memory_store
 
     def _repair_quiz(self, parsed: ParsedContent, quiz: Quiz, config: QuizConfig) -> Quiz:
         if not quiz or not isinstance(getattr(quiz, "questions", None), list):
