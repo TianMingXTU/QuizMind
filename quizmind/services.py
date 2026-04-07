@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import random
@@ -156,18 +156,21 @@ class QuizEngine:
 
         sanitized_questions: list[Question] = []
         used_ids: set[str] = set()
+        used_signatures: set[str] = set()
         for idx, question in enumerate(quiz.questions, start=1):
             repaired = self._repair_question(question, idx)
-            if repaired.id in used_ids:
-                repaired = repaired.model_copy(update={"id": f"{repaired.id}_{idx}"})
+            signature = self._question_signature(repaired)
+            if repaired.id in used_ids or signature in used_signatures:
+                continue
             used_ids.add(repaired.id)
+            used_signatures.add(signature)
             sanitized_questions.append(repaired)
 
         if not sanitized_questions:
             return self._generate_locally(parsed, config)
 
         repaired_quiz = Quiz(
-            title=(quiz.title or f"{parsed.title} - 智能练习").strip(),
+        title=(quiz.title or f"{parsed.title} - 智能练习").strip(),
             source_summary=(quiz.source_summary or parsed.title).strip(),
             questions=sanitized_questions,
         )
@@ -177,18 +180,64 @@ class QuizEngine:
         if not should_pad:
             return repaired_quiz.model_copy(update={"questions": repaired_quiz.questions[: config.question_count]})
 
-        filler = self._generate_locally(parsed, config).questions
+        filler: list[Question] = []
+        for _ in range(3):
+            try:
+                llm_quiz = self.provider.generate_quiz(parsed, config)
+            except Exception:
+                llm_quiz = None
+            if not llm_quiz or not llm_quiz.questions:
+                continue
+            for idx, item in enumerate(llm_quiz.questions, start=1):
+                repaired = self._repair_question(item, idx)
+                filler.append(repaired)
+            if len(filler) >= config.question_count:
+                break
+
+        if not filler:
+            filler = self._generate_locally(parsed, config).questions
+
         existing_ids = {q.id for q in repaired_quiz.questions}
+        existing_sigs = {self._question_signature(q) for q in repaired_quiz.questions}
         merged = list(repaired_quiz.questions)
         for item in filler:
             if len(merged) >= config.question_count:
                 break
-            if item.id in existing_ids:
+            sig = self._question_signature(item)
+            if item.id in existing_ids or sig in existing_sigs:
                 continue
             merged.append(item)
             existing_ids.add(item.id)
+            existing_sigs.add(sig)
 
         return repaired_quiz.model_copy(update={"questions": merged[: config.question_count]})
+
+    def _question_signature(self, question: Question) -> str:
+        prompt = re.sub(r"\s+", "", (question.prompt or "").strip().lower())
+        prompt = re.sub(r"[^\w\u4e00-\u9fff]", "", prompt)
+        qtype = str(question.question_type.value)
+        options = "|".join(sorted(str(o).strip().lower() for o in (question.options or [])))
+        return f"{qtype}::{prompt}::{options}"
+
+    def _normalize_quiz_for_display(self, parsed: ParsedContent, quiz: Quiz) -> Quiz:
+        """Normalize loaded quiz structure for consistent UI rendering without altering quiz size."""
+        if not quiz or not isinstance(getattr(quiz, "questions", None), list):
+            return Quiz(title=parsed.title, source_summary=parsed.title, questions=[])
+
+        sanitized_questions: list[Question] = []
+        used_ids: set[str] = set()
+        for idx, question in enumerate(quiz.questions, start=1):
+            repaired = self._repair_question(question, idx)
+            if repaired.id in used_ids:
+                repaired = repaired.model_copy(update={"id": f"{repaired.id}_{idx}"})
+            used_ids.add(repaired.id)
+            sanitized_questions.append(repaired)
+
+        return Quiz(
+            title=(quiz.title or f"{parsed.title} - 智能练习").strip(),
+            source_summary=(quiz.source_summary or parsed.title).strip(),
+            questions=sanitized_questions,
+        )
 
     def _repair_question(self, question: Question, index: int) -> Question:
         data = question.model_dump()
@@ -223,8 +272,8 @@ class QuizEngine:
                 correct_answer = ["正确"]
         elif qtype in {QuestionType.single_choice.value, QuestionType.multiple_choice.value}:
             if not options:
-                seed = correct_answer[0] if correct_answer else "选项A"
-                options = [seed, "选项B", "选项C", "选项D"]
+                seed = correct_answer[0] if correct_answer else "閫夐」A"
+                options = [seed, "閫夐」B", "閫夐」C", "閫夐」D"]
             if not correct_answer:
                 correct_answer = [options[0]]
         else:
@@ -367,7 +416,7 @@ class QuizEngine:
         if not found:
             return None
         parsed, quiz, _ = found
-        return parsed, quiz
+        return parsed, self._normalize_quiz_for_display(parsed, quiz)
 
     def delete_saved_quiz(self, record_id: str) -> bool:
         return self.quiz_bank.delete_by_id(record_id)
@@ -397,7 +446,7 @@ class QuizEngine:
 
         return Quiz(
             title=f"{parsed.title} - 智能练习",
-            source_summary="，".join(parsed.concepts[:6]) or parsed.title,
+            source_summary="；".join(parsed.concepts[:6]) or parsed.title,
             questions=questions[: config.question_count],
         )
 
@@ -454,7 +503,7 @@ class QuizEngine:
                 prompt=f"以下哪些选项与“{point.name}”直接相关？",
                 options=options,
                 correct_answer=correct,
-                explanation=f"直接相关的关键点包括：{'，'.join(correct)}",
+                explanation=f"直接相关的关键点包括：{'；'.join(correct)}",
                 knowledge_tags=[point.name],
                 difficulty=difficulty,
                 reference_points=point.keywords,
@@ -532,27 +581,39 @@ class GradingService:
             question_map = {question.id: question for question in quiz.questions}
             results: List[QuestionResult] = []
 
-            subjective_pairs = [
+            all_pairs = [
                 (question, answer_map.get(question.id, []))
                 for question in quiz.questions
-                if question.question_type == QuestionType.short_answer
             ]
             try:
-                subjective_grades = self.provider.grade_subjective_batch(subjective_pairs)
+                llm_grades = self.provider.grade_subjective_batch(all_pairs)
             except Exception as exc:
-                log_event("service.grade.subjective_batch_error", error=str(exc))
-                subjective_grades = {}
-            if subjective_pairs:
+                log_event("service.grade.llm_batch_error", error=str(exc))
+                llm_grades = {}
+            if all_pairs:
                 log_event(
-                    "service.grade.subjective_batch",
-                    question_count=len(subjective_pairs),
-                    llm_graded=len(subjective_grades),
+                    "service.grade.llm_batch",
+                    question_count=len(all_pairs),
+                    llm_graded=len(llm_grades),
                 )
 
             for question in quiz.questions:
                 user_answer = answer_map.get(question.id, [])
-                if question.question_type == QuestionType.short_answer:
-                    result = self._grade_subjective(question, user_answer, subjective_grades.get(question.id))
+                llm_grade = llm_grades.get(question.id)
+                if llm_grade:
+                    objective = question.question_type != QuestionType.short_answer
+                    threshold = 99.0 if objective else 60.0
+                    result = QuestionResult(
+                        question_id=question.id,
+                        is_correct=llm_grade.score >= threshold,
+                        score=llm_grade.score,
+                        user_answer=user_answer,
+                        correct_answer=question.correct_answer,
+                        feedback=llm_grade.feedback or question.explanation,
+                        missing_points=llm_grade.missing_points,
+                    )
+                elif question.question_type == QuestionType.short_answer:
+                    result = self._grade_subjective(question, user_answer, None)
                 else:
                     result = self._grade_objective(question, user_answer)
                 results.append(result)
@@ -564,7 +625,7 @@ class GradingService:
         normalized_correct = {item.strip() for item in question.correct_answer if item.strip()}
         is_correct = normalized_user == normalized_correct
         score = 100.0 if is_correct else 0.0
-        feedback = "回答正确。 " if is_correct else f"正确答案：{', '.join(question.correct_answer)}。"
+        feedback = "回答正确。" if is_correct else f"正确答案：{', '.join(question.correct_answer)}。"
         return QuestionResult(
             question_id=question.id,
             is_correct=is_correct,
@@ -680,3 +741,51 @@ def build_reinforcement_quiz(parsed: ParsedContent, report: FeedbackReport, conf
         ),
         allow_ai_generation=True,
     )
+
+
+def build_targeted_quiz(
+    parsed: ParsedContent,
+    focus_topics: list[str],
+    config: QuizConfig,
+    question_count: int | None = None,
+    allow_ai_generation: bool = True,
+) -> Quiz:
+    focus_set = {str(item).strip() for item in focus_topics if str(item).strip()}
+    if focus_set:
+        focus_points = [
+            point
+            for point in parsed.knowledge_points
+            if point.name in focus_set
+            or any(keyword in focus_set for keyword in point.keywords)
+        ]
+    else:
+        focus_points = []
+    if not focus_points:
+        focus_points = parsed.knowledge_points[:4]
+
+    focused = ParsedContent(
+        title=f"{parsed.title} - 定向练习",
+        source_type=parsed.source_type,
+        cleaned_text=parsed.cleaned_text,
+        segments=[point.summary for point in focus_points],
+        knowledge_points=focus_points,
+        concepts=[point.name for point in focus_points],
+    )
+    total = question_count or min(max(6, len(focus_points) * 3), config.question_count + 4)
+    targeted_config = QuizConfig(
+        question_count=max(5, min(30, total)),
+        difficulty_mix={"easy": 25, "medium": 50, "hard": 25},
+        type_mix={
+            "single_choice": 35,
+            "multiple_choice": 25,
+            "fill_blank": 20,
+            "short_answer": 15,
+            "true_false": 5,
+        },
+    )
+    return QuizEngine().generate_quiz(
+        focused,
+        targeted_config,
+        allow_ai_generation=allow_ai_generation,
+    )
+

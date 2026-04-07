@@ -72,6 +72,9 @@ GRADE_BATCH_SYSTEM_PROMPT = (
     "You are a strict but supportive grader. Return JSON only.\n"
     "Output schema: grades (list). Each grade item includes: question_id, score(0-100), "
     "feedback, missing_points.\n"
+    "For objective questions (single_choice, multiple_choice, true_false, fill_blank), "
+    "use exact-match style grading and prefer 0 or 100.\n"
+    "For short_answer, score by semantic completeness against reference points.\n"
     "Prefer Simplified Chinese for natural-language fields. If unstable, output English.\n"
     "Do not output mojibake."
 )
@@ -106,7 +109,7 @@ class LangChainQuizProvider:
         api_key = os.getenv("SILICONFLOW_API_KEY") or os.getenv("OPENAI_API_KEY")
         base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
         self.model = os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3.2")
-        self.fast_mode = self._safe_bool_env("QUIZMIND_FAST_MODE", True)
+        self.fast_mode = self._safe_bool_env("QUIZMIND_FAST_MODE", False)
         self.llm_timeout = max(10, self._safe_int_env("QUIZMIND_LLM_TIMEOUT", 45))
         self.llm_max_retries = max(0, self._safe_int_env("QUIZMIND_LLM_MAX_RETRIES", 2))
         default_attempts = 1 if self.fast_mode else 3
@@ -182,6 +185,7 @@ class LangChainQuizProvider:
             system_prompt=PARSE_CONTENT_SYSTEM_PROMPT,
             human_prompt="Please parse the following learning content:\n{payload}",
             payload=payload,
+            use_cache=False,
         )
         if not response:
             return fallback_parse_content(source, source_type)
@@ -325,6 +329,7 @@ class LangChainQuizProvider:
             system_prompt=GENERATE_FROM_SOURCE_SYSTEM_PROMPT,
             human_prompt="Process the raw content below and output parsed_content + quiz:\n{payload}",
             payload=payload,
+            use_cache=False,
         )
         if not response:
             parsed = fallback_parse_content(source, source_type)
@@ -368,7 +373,9 @@ class LangChainQuizProvider:
             "items": [
                 {
                     "question_id": question.id,
+                    "question_type": question.question_type.value,
                     "prompt": question.prompt,
+                    "options": question.options,
                     "correct_answer": question.correct_answer,
                     "reference_points": question.reference_points,
                     "user_answer": answer,
@@ -381,8 +388,9 @@ class LangChainQuizProvider:
             operation="grade_subjective_batch",
             temperature=0.1,
             system_prompt=GRADE_BATCH_SYSTEM_PROMPT,
-            human_prompt="Grade the following subjective answers in batch:\n{payload}",
+            human_prompt="Grade the following answers in batch (objective and subjective):\n{payload}",
             payload=payload,
+            use_cache=False,
         )
         if not response:
             return {}
@@ -1104,6 +1112,15 @@ class LangChainQuizProvider:
                 for q in quiz.questions
             )
             score += 15 if short_ok else 0
+
+        # Penalize duplicate prompts to prioritize diversity.
+        prompt_keys = [
+            re.sub(r"[^\w\u4e00-\u9fff]", "", (q.prompt or "").lower())
+            for q in quiz.questions
+        ]
+        dedup = len(set(prompt_keys))
+        duplicates = max(0, len(prompt_keys) - dedup)
+        score -= duplicates * 10
         return score
 
     def _quiz_quality_good(self, quiz: Quiz, config: QuizConfig) -> bool:

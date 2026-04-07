@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from typing import List
@@ -10,13 +10,15 @@ from quizmind.content import load_text_from_upload, load_text_from_url
 from quizmind.exporter import QuizExporter
 from quizmind.generation_queue import GenerationQueue
 from quizmind.logger import log_event, read_recent_logs
-from quizmind.models import Question, QuestionType, QuizConfig, QuizMode, UserAnswer
+from quizmind.models import Question, QuestionType, Quiz, QuizConfig, QuizMode, UserAnswer
 from quizmind.services import (
     ContentService,
     GradingService,
     QuizEngine,
+    build_targeted_quiz,
     build_reinforcement_quiz,
 )
+from quizmind.user_store import UserFeatureStore
 
 
 st.set_page_config(page_title="QuizMind", page_icon="🧠", layout="wide")
@@ -24,7 +26,14 @@ st.set_page_config(page_title="QuizMind", page_icon="🧠", layout="wide")
 
 @st.cache_resource
 def get_services() -> (
-    tuple[ContentService, QuizEngine, GradingService, GenerationQueue, QuizExporter]
+    tuple[
+        ContentService,
+        QuizEngine,
+        GradingService,
+        GenerationQueue,
+        QuizExporter,
+        UserFeatureStore,
+    ]
 ):
     return (
         ContentService(),
@@ -32,6 +41,7 @@ def get_services() -> (
         GradingService(),
         GenerationQueue(),
         QuizExporter(),
+        UserFeatureStore(),
     )
 
 
@@ -66,7 +76,6 @@ def inject_styles() -> None:
         unsafe_allow_html=True,
     )
 
-
 def init_state() -> None:
     defaults = {
         "parsed": None,
@@ -84,6 +93,8 @@ def init_state() -> None:
         "selected_record_id": "",
         "interactive_html": "",
         "interactive_key": "",
+        "quality_guard_applied": False,
+        "last_session_logged_key": "",
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -99,7 +110,9 @@ def goto_step(step: int) -> None:
 
 def collect_source() -> tuple[str, str]:
     input_mode = st.radio(
-        "输入方式", ["粘贴文本", "上传文件（可多选）", "网页 URL"], horizontal=True
+        "输入方式",
+        ["粘贴文本", "上传文件（可多选）", "网页 URL"],
+        horizontal=True,
     )
     if input_mode == "粘贴文本":
         text = st.text_area(
@@ -173,7 +186,7 @@ def collect_source() -> tuple[str, str]:
 
 def render_sidebar(
     engine: QuizEngine,
-) -> tuple[QuizConfig, str, str, int, QuizMode, int, bool, bool, bool]:
+) -> tuple[QuizConfig, str, str, int, QuizMode, int, bool, bool, bool, bool, bool]:
     st.sidebar.markdown("### 练习配置")
     source_mode = st.sidebar.radio("内容来源", ["当前内容", "记忆模式"], index=0)
     mode_cn = st.sidebar.radio("作答模式", ["练习模式", "考试模式"], index=0)
@@ -185,11 +198,14 @@ def render_sidebar(
     )
 
     st.sidebar.markdown("### 生成策略")
-    use_saved_first = st.sidebar.checkbox("优先使用已保存题目", value=True)
-    allow_ai_generation = st.sidebar.checkbox("允许 AI 生成新题", value=True)
+    use_saved_first = st.sidebar.checkbox("优先使用已保存题目", value=False, disabled=True)
+    allow_ai_generation = st.sidebar.checkbox("允许 AI 生成新题", value=True, disabled=True)
     enable_interactive_knowledge = st.sidebar.checkbox(
-        "启用知识点互动小网页（可选）", value=False
+        "启用知识点互动网页（可选）", value=False
     )
+
+    guided_mode = st.sidebar.checkbox("新手引导模式", value=True)
+    adaptive_difficulty = st.sidebar.checkbox("启用自适应难度", value=True)
 
     memory_query = ""
     memory_top_k = 4
@@ -239,6 +255,8 @@ def render_sidebar(
         use_saved_first,
         allow_ai_generation,
         enable_interactive_knowledge,
+        guided_mode,
+        adaptive_difficulty,
     )
 
 
@@ -361,6 +379,171 @@ def render_runtime_panel() -> None:
     c4.metric("简答批量评分", summary["batch_grade"])
 
 
+def render_beginner_guide(guided_mode: bool) -> None:
+    if not guided_mode:
+        return
+    source_ready = bool((st.session_state.get("source_text") or "").strip())
+    parsed_ready = st.session_state.get("parsed") is not None
+    quiz_ready = st.session_state.get("quiz") is not None
+    report_ready = st.session_state.get("report") is not None
+
+    with st.expander("新手引导", expanded=not report_ready):
+        st.write("推荐流程：输入内容 -> 解析/出题 -> 作答提交 -> 结果复盘。")
+        st.markdown(
+            f"- 输入内容：{'已完成' if source_ready else '未完成'}\n"
+            f"- 解析完成：{'已完成' if parsed_ready else '未完成'}\n"
+            f"- 题目就绪：{'已完成' if quiz_ready else '未完成'}\n"
+            f"- 已提交结果：{'已完成' if report_ready else '未完成'}"
+        )
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            if st.button("去第1步", width="stretch", key="guide_to_step1"):
+                goto_step(1)
+                st.rerun()
+        with c2:
+            if st.button("去第2步", width="stretch", key="guide_to_step2"):
+                goto_step(2)
+                st.rerun()
+        with c3:
+            if st.button("去第3步", width="stretch", key="guide_to_step3"):
+                goto_step(3)
+                st.rerun()
+        with c4:
+            if st.button("去第4步", width="stretch", key="guide_to_step4"):
+                goto_step(4)
+                st.rerun()
+
+
+def apply_quality_guard(
+    quiz: Quiz | None,
+    parsed,
+    config: QuizConfig,
+    engine: QuizEngine,
+    allow_ai_generation: bool,
+    user_store: UserFeatureStore,
+) -> Quiz | None:
+    if not quiz or not getattr(quiz, "questions", None):
+        return quiz
+    blocked_tags = user_store.blocked_tags(min_votes=2)
+    if not blocked_tags:
+        return quiz
+
+    original_total = len(quiz.questions)
+    filtered = [
+        q
+        for q in quiz.questions
+        if not (set(q.knowledge_tags or []) & blocked_tags)
+    ]
+    dropped = original_total - len(filtered)
+    if dropped <= 0:
+        return quiz
+
+    fallback = engine.generate_quiz(
+        parsed,
+        config,
+        allow_ai_generation=True,
+    )
+    existing = {q.id for q in filtered}
+    for item in fallback.questions:
+        if len(filtered) >= original_total:
+            break
+        if item.id in existing:
+            continue
+        if set(item.knowledge_tags or []) & blocked_tags:
+            continue
+        filtered.append(item)
+        existing.add(item.id)
+
+    if len(filtered) < original_total:
+        filtered.extend(quiz.questions[len(filtered):original_total])
+
+    st.session_state.quality_guard_applied = True
+    st.info(f"已根据历史反馈替换 {dropped} 道低质量倾向题目。")
+    return quiz.model_copy(update={"questions": filtered[:original_total]})
+
+
+def build_active_config(
+    config: QuizConfig,
+    adaptive_difficulty: bool,
+    user_store: UserFeatureStore,
+) -> QuizConfig:
+    if not adaptive_difficulty:
+        return config
+    mixed = user_store.suggest_difficulty_mix(config.difficulty_mix)
+    if mixed == config.difficulty_mix:
+        return config
+    st.caption(
+        f"自适应难度已生效：easy={mixed['easy']}%, medium={mixed['medium']}%, hard={mixed['hard']}%"
+    )
+    return config.model_copy(update={"difficulty_mix": mixed})
+
+
+def log_learning_session_if_needed(user_store: UserFeatureStore) -> None:
+    report = st.session_state.get("report")
+    quiz = st.session_state.get("quiz")
+    if not report or not quiz:
+        return
+    session_key = f"{quiz.title}|{report.overall_score}|{len(report.wrong_questions)}"
+    if st.session_state.get("last_session_logged_key") == session_key:
+        return
+    user_store.add_learning_session(
+        source_name=st.session_state.get("source_name", "当前输入"),
+        quiz_title=quiz.title,
+        overall_score=report.overall_score,
+        objective_accuracy=report.objective_accuracy,
+        subjective_average=report.subjective_average,
+        wrong_count=len(report.wrong_questions),
+        weak_topics=list(report.reinforcement_topics),
+    )
+    st.session_state.last_session_logged_key = session_key
+
+
+def render_learning_dashboard(user_store: UserFeatureStore) -> None:
+    board = user_store.weekly_dashboard(days=7)
+    st.markdown("**学习进度（7天）**")
+    c1, c2 = st.columns(2)
+    c1.metric("近7天练习次数", board["total_attempts"])
+    c2.metric("近期平均分", f"{board['avg_score']:.1f}")
+    st.line_chart(
+        {"day": board["labels"], "avg_score": board["avg_scores"]},
+        x="day",
+        y="avg_score",
+    )
+    st.bar_chart(
+        {"day": board["labels"], "attempts": board["attempts"]},
+        x="day",
+        y="attempts",
+    )
+
+
+def render_favorites_panel(user_store: UserFeatureStore) -> None:
+    with st.expander("我的收藏题单", expanded=False):
+        favorites = user_store.list_favorites()
+        st.caption(f"已收藏 {len(favorites)} 道题。")
+        if not favorites:
+            st.info("先在作答页收藏题目，之后可在这里集中复练。")
+            return
+        preview = [
+            {
+                "added_at": item.get("added_at", ""),
+                "source": item.get("source_title", ""),
+                "prompt": str((item.get("question") or {}).get("prompt", ""))[:90],
+                "tags": ", ".join((item.get("question") or {}).get("knowledge_tags", [])[:3]),
+            }
+            for item in favorites[:50]
+        ]
+        st.dataframe(preview, width="stretch", hide_index=True)
+        if st.button("加载收藏题到当前会话", width="stretch"):
+            quiz = user_store.build_favorites_quiz(question_limit=15)
+            if quiz:
+                st.session_state.quiz = quiz
+                st.session_state.report = None
+                st.session_state.reinforcement_quiz = None
+                st.session_state.last_generation_mode = QuizMode.practice.value
+                goto_step(3)
+                st.rerun()
+
+
 def qtype_label(qtype: QuestionType | str) -> str:
     normalized = QuestionType.normalize(qtype)
     mapping = {
@@ -379,10 +562,15 @@ def diff_label(value: str) -> str:
 
 def answer_state_key(question: Question, index: int) -> str:
     safe_id = str(getattr(question, "id", f"q{index}")).strip() or f"q{index}"
-    return f"answer_{index}_{safe_id}"
+    return f"answer_{safe_id}"
 
 
-def render_question_widget(question: Question, index: int) -> None:
+def render_question_widget(
+    question: Question,
+    index: int,
+    user_store: UserFeatureStore,
+    source_title: str,
+) -> None:
     key = answer_state_key(question, index)
     qtype = QuestionType.normalize(getattr(question, "question_type", ""))
     options = [str(item) for item in (question.options or []) if str(item).strip()]
@@ -397,12 +585,37 @@ def render_question_widget(question: Question, index: int) -> None:
     tags = question.knowledge_tags[:2] if question.knowledge_tags else ["untagged"]
 
     st.markdown(
-        f'<div class="qm-question"><div style="font-weight:700;">{question.id} · {qtype_label(question.question_type)}</div>'
+        f'<div class="qm-question"><div style="font-weight:700;">{question.id} 路 {qtype_label(question.question_type)}</div>'
         f'<div><span class="qm-chip">{diff_label(str(difficulty_value))}</span>'
         f'<span class="qm-chip">{"/".join(tags)}</span></div>'
         f'<div style="margin-top:8px;">{prompt}</div></div>',
         unsafe_allow_html=True,
     )
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        if user_store.has_favorite(question):
+            if st.button("取消收藏", key=f"unfav_{key}", width="stretch"):
+                user_store.remove_favorite(user_store.question_fingerprint(question))
+                st.rerun()
+        else:
+            if st.button("收藏这题", key=f"fav_{key}", width="stretch"):
+                user_store.add_favorite(question, source_title=source_title)
+                st.success("已加入收藏题单。")
+    with c2:
+        feedback_choice = st.selectbox(
+            "题目反馈",
+            ["暂不反馈", "太简单", "太难", "题干不清晰", "疑似错误"],
+            key=f"feedback_choice_{key}",
+            label_visibility="collapsed",
+        )
+        if feedback_choice != "暂不反馈":
+            if st.button("提交反馈", key=f"fb_submit_{key}", width="stretch"):
+                user_store.add_quality_feedback(
+                    question,
+                    verdict=feedback_choice,
+                    source_title=source_title,
+                )
+                st.success("反馈已记录，后续将用于题目质量优化。")
 
     if qtype == QuestionType.single_choice.value:
         if options:
@@ -428,7 +641,7 @@ def render_question_widget(question: Question, index: int) -> None:
         st.text_area("Answer", key=key, height=120, label_visibility="collapsed")
 
 
-def render_all_questions(quiz) -> None:
+def render_all_questions(quiz, user_store: UserFeatureStore) -> None:
     total = len(quiz.questions)
     st.progress(
         answered_count() / max(1, total), text=f"已作答 {answered_count()} / {total}"
@@ -446,7 +659,12 @@ def render_all_questions(quiz) -> None:
     for idx, question in enumerate(quiz.questions, start=1):
         st.markdown(f"**第 {idx} 题**")
         try:
-            render_question_widget(question, idx)
+            render_question_widget(
+                question,
+                idx,
+                user_store=user_store,
+                source_title=st.session_state.get("source_name", "当前输入"),
+            )
         except Exception as exc:
             log_event(
                 "ui.render_question.error",
@@ -544,9 +762,11 @@ def render_report() -> None:
     st.markdown("**错题本**")
     qmap = {q.id: q for q in quiz.questions}
     if not report.wrong_questions:
-        st.success("本轮没有错题，掌握不错。")
+        st.success("本轮没有错题，掌握得不错。")
     for wrong in report.wrong_questions:
-        q = qmap[wrong.question_id]
+        q = qmap.get(wrong.question_id)
+        if not q:
+            continue
         st.markdown(
             f"- **{wrong.question_id} {q.prompt}** \n"
             f"你的答案：{', '.join(wrong.user_answer) or '未作答'}  \n"
@@ -585,9 +805,7 @@ def render_quiz_bank_panel(engine: QuizEngine, exporter: QuizExporter) -> None:
             return
 
         options = {
-            f"{item['created_at']} | {item['source_name']} | {item['title']} | 标签:{','.join(item.get('tags', [])[:3])}": item[
-                "id"
-            ]
+            f"{item['created_at']} | {item['source_name']} | {item['title']} | 标签:{','.join(item.get('tags', [])[:3])}": item["id"]
             for item in records
         }
         chosen = st.selectbox("选择记录", list(options.keys()))
@@ -686,7 +904,7 @@ def render_queue_panel(
         with w1:
             max_workers = st.slider("并发处理数", 1, 8, 2, 1)
         with w2:
-            st.caption("并发越高处理越快，但 API 压力也会更高。")
+            st.caption("并发越高处理越快，但 API 压力也更高。")
 
         b1, b2, b3, b4 = st.columns(4)
         with b1:
@@ -756,7 +974,7 @@ def render_queue_panel(
 def main() -> None:
     init_state()
     inject_styles()
-    content_service, engine, grader, queue, exporter = get_services()
+    content_service, engine, grader, queue, exporter, user_store = get_services()
 
     st.title("QuizMind 智能练习与考试系统")
     st.caption("单页流程：输入解析 -> 自动出题 -> 作答评测 -> 强化训练")
@@ -771,7 +989,11 @@ def main() -> None:
         use_saved_first,
         allow_ai_generation,
         enable_interactive_knowledge,
+        guided_mode,
+        adaptive_difficulty,
     ) = render_sidebar(engine)
+    render_beginner_guide(guided_mode)
+    active_config = build_active_config(config, adaptive_difficulty, user_store)
     render_runtime_panel()
     st.divider()
 
@@ -792,9 +1014,7 @@ def main() -> None:
                 elif not source_text.strip():
                     st.warning("请先输入学习内容。")
                 else:
-                    st.session_state.parsed = content_service.parse(
-                        source_text, source_type
-                    )
+                    st.session_state.parsed = content_service.parse(source_text, source_type)
                     st.session_state.quiz = None
                     st.session_state.report = None
                     st.session_state.reinforcement_quiz = None
@@ -814,43 +1034,45 @@ def main() -> None:
         with c3:
             if st.button("一键解析并出题", type="primary", width="stretch"):
                 if source_mode == "记忆模式":
-                    st.warning("记忆模式无需解析，请在第 2 步直接生成题目。")
+                    st.warning("记忆模式请在第 2 步直接生成题目。")
                 elif not source_text.strip():
                     st.warning("请先输入学习内容。")
                 else:
                     with st.spinner("正在执行一键流程：组卷 -> 入库..."):
                         st.session_state.source_text = source_text
                         st.session_state.source_type = source_type
-
                         parsed, quiz, meta = engine.generate_or_load_from_source(
                             source=source_text,
                             source_type=source_type,
                             source_name=st.session_state.get("source_name", "当前输入"),
-                            config=config,
+                            config=active_config,
                             use_saved_first=use_saved_first,
                             allow_ai_generation=allow_ai_generation,
                         )
                         st.session_state.parsed = parsed
-                        st.session_state.quiz = quiz
+                        st.session_state.quiz = apply_quality_guard(
+                            quiz,
+                            parsed,
+                            active_config,
+                            engine,
+                            allow_ai_generation,
+                            user_store,
+                        )
                         st.session_state.report = None
                         st.session_state.reinforcement_quiz = None
                         st.session_state.interactive_html = ""
                         st.session_state.interactive_key = ""
-
                         try:
                             snapshot = engine.save_memory(parsed)
                             st.session_state.memory_snapshot = snapshot
                         except Exception as exc:
-                            log_event(
-                                "flow.one_click.save_memory_failed", error=str(exc)
-                            )
-
+                            log_event("flow.one_click.save_memory_failed", error=str(exc))
                         start_exam_if_needed(quiz_mode, exam_minutes)
                         goto_step(3)
                         if meta.get("from_saved"):
-                            st.info("一键流程完成：已复用已保存题目并进入作答区。")
+                            st.info("已复用历史题目并进入作答区。")
                         else:
-                            st.success("一键流程完成：已生成新题并进入作答区。")
+                            st.success("已生成新题并进入作答区。")
                     st.rerun()
 
         render_parsed_summary()
@@ -861,17 +1083,23 @@ def main() -> None:
         )
 
     with st.expander("2) 组卷与题库/队列", expanded=st.session_state.flow_step == 2):
-        st.caption(
-            "优先复用已保存题目可以减少 API 调用；关闭 AI 后将使用本地规则生成。"
-        )
+        st.caption("优先复用题库可减少 API 调用；关闭 AI 时使用本地规则生成。")
         if st.button("生成题目", width="stretch"):
             try:
                 if source_mode == "当前内容":
                     if st.session_state.parsed is not None:
-                        st.session_state.quiz = engine.generate_quiz(
+                        generated = engine.generate_quiz(
                             st.session_state.parsed,
-                            config,
+                            active_config,
                             allow_ai_generation=allow_ai_generation,
+                        )
+                        st.session_state.quiz = apply_quality_guard(
+                            generated,
+                            st.session_state.parsed,
+                            active_config,
+                            engine,
+                            allow_ai_generation,
+                            user_store,
                         )
                         st.success("已基于解析结果生成题目。")
                     elif source_text.strip():
@@ -879,27 +1107,41 @@ def main() -> None:
                             source=source_text,
                             source_type=source_type,
                             source_name=st.session_state.get("source_name", "当前输入"),
-                            config=config,
+                            config=active_config,
                             use_saved_first=use_saved_first,
                             allow_ai_generation=allow_ai_generation,
                         )
                         st.session_state.parsed = parsed
-                        st.session_state.quiz = quiz
+                        st.session_state.quiz = apply_quality_guard(
+                            quiz,
+                            parsed,
+                            active_config,
+                            engine,
+                            allow_ai_generation,
+                            user_store,
+                        )
                         if meta.get("from_saved"):
-                            st.info("本次直接使用了已保存题目。")
+                            st.info("本次使用了已保存题目。")
                         else:
                             st.success("已生成并保存新题目。")
                     else:
                         st.warning("请先输入学习内容。")
                         return
                 else:
-                    st.session_state.parsed, st.session_state.quiz = (
-                        engine.generate_from_memory(
-                            config=config,
-                            query=memory_query,
-                            top_k=memory_top_k,
-                            allow_ai_generation=allow_ai_generation,
-                        )
+                    parsed, quiz = engine.generate_from_memory(
+                        config=active_config,
+                        query=memory_query,
+                        top_k=memory_top_k,
+                        allow_ai_generation=allow_ai_generation,
+                    )
+                    st.session_state.parsed = parsed
+                    st.session_state.quiz = apply_quality_guard(
+                        quiz,
+                        parsed,
+                        active_config,
+                        engine,
+                        allow_ai_generation,
+                        user_store,
                     )
                 st.session_state.report = None
                 st.session_state.reinforcement_quiz = None
@@ -910,7 +1152,8 @@ def main() -> None:
                 st.error(f"生成题目失败：{exc}")
 
         render_quiz_bank_panel(engine, exporter)
-        render_queue_panel(queue, engine, config, use_saved_first, allow_ai_generation)
+        render_favorites_panel(user_store)
+        render_queue_panel(queue, engine, active_config, use_saved_first, allow_ai_generation)
 
     with st.expander("3) 作答", expanded=st.session_state.flow_step == 3):
         process_exam_timeout(grader)
@@ -925,16 +1168,20 @@ def main() -> None:
             st.markdown(f"当前模式：`{current_mode}`")
             render_exam_timer()
             if not getattr(st.session_state.quiz, "questions", None):
-                st.warning(
-                    "当前题目列表为空，可能是生成/加载失败。可以点击下方按钮重新生成。"
-                )
-                if st.session_state.parsed and st.button(
-                    "重新生成题目", type="primary", width="stretch"
-                ):
-                    st.session_state.quiz = engine.generate_quiz(
+                st.warning("当前题目为空，可能是生成/加载失败。")
+                if st.session_state.parsed and st.button("重新生成题目", type="primary", width="stretch"):
+                    generated = engine.generate_quiz(
                         st.session_state.parsed,
-                        config,
+                        active_config,
                         allow_ai_generation=allow_ai_generation,
+                    )
+                    st.session_state.quiz = apply_quality_guard(
+                        generated,
+                        st.session_state.parsed,
+                        active_config,
+                        engine,
+                        allow_ai_generation,
+                        user_store,
                     )
                     st.session_state.report = None
                     st.session_state.reinforcement_quiz = None
@@ -942,16 +1189,14 @@ def main() -> None:
                     start_exam_if_needed(quiz_mode, exam_minutes)
                     st.rerun()
             else:
-                render_all_questions(st.session_state.quiz)
+                render_all_questions(st.session_state.quiz, user_store)
 
             submit_label = (
                 "提交练习"
                 if st.session_state.last_generation_mode == QuizMode.practice.value
                 else "交卷"
             )
-            if not st.session_state.report and st.button(
-                submit_label, type="primary", width="stretch"
-            ):
+            if not st.session_state.report and st.button(submit_label, type="primary", width="stretch"):
                 st.session_state.report = grader.grade(
                     st.session_state.quiz, load_answers_from_state()
                 )
@@ -960,13 +1205,35 @@ def main() -> None:
                 st.rerun()
 
     with st.expander("4) 结果复盘", expanded=st.session_state.flow_step == 4):
+        log_learning_session_if_needed(user_store)
         render_report()
+        if st.session_state.report and st.button("错题重练（变体）", width="stretch"):
+            try:
+                quiz = st.session_state.quiz
+                report = st.session_state.report
+                parsed = st.session_state.parsed
+                qmap = {q.id: q for q in (quiz.questions if quiz else [])}
+                focus_topics: list[str] = []
+                for wrong in report.wrong_questions:
+                    q = qmap.get(wrong.question_id)
+                    if q:
+                        focus_topics.extend(q.knowledge_tags or [])
+                st.session_state.reinforcement_quiz = build_targeted_quiz(
+                    parsed,
+                    focus_topics,
+                    active_config,
+                    question_count=min(max(6, len(focus_topics) * 2), 20),
+                    allow_ai_generation=allow_ai_generation,
+                )
+                st.success("已生成错题定向变体练习。")
+            except Exception as exc:
+                st.error(f"错题重练生成失败：{exc}")
         if st.session_state.report and st.button("生成针对性强化题", width="stretch"):
             try:
                 st.session_state.reinforcement_quiz = build_reinforcement_quiz(
                     st.session_state.parsed,
                     st.session_state.report,
-                    config,
+                    active_config,
                 )
             except Exception as exc:
                 st.error(f"强化题生成失败：{exc}")
@@ -978,6 +1245,14 @@ def main() -> None:
                     f"- **{question.id} {qtype_label(question.question_type)}** | 知识点：{', '.join(question.knowledge_tags)}  \n"
                     f"{question.prompt}"
                 )
+        if st.session_state.reinforcement_quiz and st.button("加载强化题到作答区", width="stretch"):
+            st.session_state.quiz = st.session_state.reinforcement_quiz
+            st.session_state.report = None
+            st.session_state.last_generation_mode = QuizMode.practice.value
+            goto_step(3)
+            st.rerun()
+
+        render_learning_dashboard(user_store)
 
         with st.expander("最近运行日志", expanded=False):
             lines = read_recent_logs(limit=25)
