@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -23,6 +23,7 @@ from quizmind.models import (
     QuestionType,
     Quiz,
     QuizConfig,
+    SceneTurnResult,
 )
 
 
@@ -101,6 +102,47 @@ SOURCE_MERGE_SUMMARY_PROMPT = (
     "Keep coverage complete and remove repetition.\n"
     "Preserve key terms and technical details.\n"
     "Prefer Simplified Chinese."
+)
+
+ENGINEER_SCENE_INTERVIEW_PROMPT = (
+    "You are a senior principal engineer interviewer.\n"
+    "Run a scenario-based technical interrogation in Chinese, using:\n"
+    "1) First-principles reasoning\n"
+    "2) Socratic questioning\n"
+    "3) Engineering trade-off analysis\n"
+    "4) Production-oriented thinking (reliability, scalability, security, observability)\n"
+    "Ask exactly one sharp follow-up question per turn.\n"
+    "Do not output markdown. Do not output chain-of-thought.\n"
+    "Return JSON only with keys:\n"
+    "engineer_message(string), should_end(bool), is_passed(bool), score(0-100),\n"
+    "assessment(string), strengths(list[string]), weaknesses(list[string]), recommendations(list[string]).\n"
+    "Hard rule: if is_passed is false, should_end must be false.\n"
+    "Hard rule: you can end the interview only when is_passed is true.\n"
+    "When evidence is insufficient, should_end=false and is_passed=false.\n"
+    "Do not end the interview before the candidate demonstrates clear competence.\n"
+    "When candidate is clearly competent for this scenario, set should_end=true and is_passed=true.\n"
+    "If should_end=true and is_passed=true, engineer_message must explicitly include a clear pass acknowledgement.\n"
+    "Before pass, keep should_end=false and continue probing with one concrete follow-up question.\n"
+)
+
+ENGINEER_SCENE_MODE_GUIDED_PROMPT = (
+    "Mode: guided.\n"
+    "Style requirements:\n"
+    "1) Be supportive but still rigorous; keep pressure moderate.\n"
+    "2) After evaluating the candidate answer, briefly point out 1 key gap before asking the next question.\n"
+    "3) Provide tiny directional hints (not full solution), e.g., mention one dimension such as reliability/cost/latency.\n"
+    "4) Questions should progress from basic design to trade-off and production details.\n"
+    "5) Scoring should be fair and growth-oriented; do not fail because of minor expression issues.\n"
+)
+
+ENGINEER_SCENE_MODE_STRICT_PROMPT = (
+    "Mode: strict.\n"
+    "Style requirements:\n"
+    "1) Maintain high bar and high pressure; evaluate with principal-engineer standards.\n"
+    "2) Ask concise, sharp, adversarial follow-up questions; challenge assumptions directly.\n"
+    "3) Do not provide hints or scaffolding before pass; candidate must propose concrete mechanisms independently.\n"
+    "4) Focus on correctness, completeness, failure handling, observability, security, and rollback readiness.\n"
+    "5) Passing requires clear, structured, and production-ready answers across multiple rounds.\n"
 )
 
 
@@ -431,6 +473,106 @@ class LangChainQuizProvider:
             payload=payload,
         )
 
+    def run_engineer_scene_turn(
+        self,
+        scene_description: str,
+        transcript: list[dict[str, str]],
+        max_rounds: int = 12,
+        interview_mode: str = "guided",
+    ) -> dict:
+        if not self.llm:
+            return SceneTurnResult(
+                engineer_message="当前未配置可用大模型，无法启动场景拷问模式。",
+                should_end=True,
+                is_passed=False,
+                score=0,
+                assessment="模型不可用",
+                strengths=[],
+                weaknesses=["未配置可用模型"],
+                recommendations=["请先配置 OPENAI_API_KEY 或 SILICONFLOW_API_KEY。"],
+            ).model_dump()
+
+        normalized_scene = (scene_description or "").strip()
+        mode = str(interview_mode or "guided").strip().lower()
+        if mode not in {"guided", "strict"}:
+            mode = "guided"
+        mode_prompt = (
+            ENGINEER_SCENE_MODE_STRICT_PROMPT
+            if mode == "strict"
+            else ENGINEER_SCENE_MODE_GUIDED_PROMPT
+        )
+        turns = transcript[-24:] if isinstance(transcript, list) else []
+        payload = {
+            "scene_description": normalized_scene,
+            "interview_mode": mode,
+            "transcript": turns,
+            # Internal guard only; end decision is based on pass status.
+            "max_rounds": max_rounds,
+            "current_round": max(0, len([x for x in turns if x.get("role") == "engineer"])),
+        }
+        response = self._invoke_json(
+            operation="engineer_scene_turn",
+            temperature=0.35,
+            system_prompt=f"{ENGINEER_SCENE_INTERVIEW_PROMPT}\n{mode_prompt}",
+            human_prompt=(
+                "Based on the scenario and transcript below, produce the next interviewer turn.\n"
+                "If transcript is empty, start the interview with a concise opening and first question.\n"
+                "Only end when the candidate is clearly passed.\n"
+                "{payload}"
+            ),
+            payload=payload,
+            use_cache=False,
+        )
+        if not isinstance(response, dict):
+            return SceneTurnResult(
+                engineer_message="本轮生成失败，请重试。",
+                should_end=False,
+                is_passed=False,
+                score=0,
+                assessment="",
+                strengths=[],
+                weaknesses=[],
+                recommendations=[],
+            ).model_dump()
+
+        raw_message = str(response.get("engineer_message", "")).strip()
+        should_end = bool(response.get("should_end", False))
+        is_passed = bool(response.get("is_passed", False))
+        if not is_passed:
+            should_end = False
+        if should_end and is_passed and "通过" not in raw_message and "认可" not in raw_message:
+            raw_message = f"{raw_message} 我认可你通过了这个场景。".strip()
+
+        try:
+            score = float(response.get("score", 0))
+        except Exception:
+            score = 0.0
+        score = max(0.0, min(100.0, score))
+
+        result = SceneTurnResult(
+            engineer_message=raw_message,
+            should_end=should_end,
+            is_passed=is_passed,
+            score=score,
+            assessment=str(response.get("assessment", "")).strip(),
+            strengths=[
+                str(x).strip()
+                for x in response.get("strengths", [])
+                if str(x).strip()
+            ],
+            weaknesses=[
+                str(x).strip()
+                for x in response.get("weaknesses", [])
+                if str(x).strip()
+            ],
+            recommendations=[
+                str(x).strip()
+                for x in response.get("recommendations", [])
+                if str(x).strip()
+            ],
+        )
+        return result.model_dump()
+
     def _invoke_json(
         self,
         operation: str,
@@ -454,27 +596,56 @@ class LangChainQuizProvider:
                 return cached
 
         log_event("llm.cache_miss", operation=operation, key=cache_key)
-
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", system_prompt),
-                ("human", "{format_instructions}\n\n" + human_prompt),
-            ]
-        )
         parser = JsonOutputParser()
+        prompt = self._build_prompt(
+            system_prompt=system_prompt,
+            human_prompt=human_prompt,
+            include_format_instructions=True,
+        )
         message_vars = {
             "payload": json.dumps(payload, ensure_ascii=False),
             "format_instructions": parser.get_format_instructions(),
         }
 
+        # Primary path: full LangChain structured output chain.
         try:
-            chain = (
-                prompt
-                | self.llm.bind(**self._llm_bind_kwargs(temperature))
-                | StrOutputParser()
+            data = self._invoke_json_chain(
+                operation=operation,
+                temperature=temperature,
+                prompt=prompt,
+                parser=parser,
+                message_vars=message_vars,
             )
-            with timed_event("llm.invoke", operation=operation, model=self.model):
-                text = chain.invoke(message_vars)
+            if data is not None:
+                if use_cache:
+                    self.cache.set(cache_key, data)
+                log_event("llm.invoke.success", operation=operation, model=self.model)
+                return data
+        except Exception as exc:
+            log_event(
+                "llm.invoke_json_chain_failed",
+                operation=operation,
+                model=self.model,
+                error_type=exc.__class__.__name__,
+                error=str(exc),
+            )
+
+        # Fallback path: text chain + local JSON recovery.
+        try:
+            fallback_prompt = self._build_prompt(
+                system_prompt=system_prompt,
+                human_prompt="{format_instructions}\n\n" + human_prompt,
+                include_format_instructions=False,
+            )
+            fallback_text = self._invoke_text_chain(
+                operation=operation,
+                temperature=temperature,
+                prompt=fallback_prompt,
+                message_vars=message_vars,
+            )
+            if not fallback_text:
+                return None
+            data = self._parse_json(fallback_text)
         except Exception as exc:
             log_event(
                 "llm.invoke_failed",
@@ -484,29 +655,6 @@ class LangChainQuizProvider:
                 error=str(exc),
             )
             return None
-
-        data: dict | None = None
-        try:
-            parsed = parser.parse(text)
-            if isinstance(parsed, dict):
-                data = parsed
-            elif isinstance(parsed, list):
-                data = {"items": parsed}
-        except Exception:
-            data = None
-
-        if data is None:
-            try:
-                data = self._parse_json(text)
-            except Exception as exc:
-                log_event(
-                    "llm.invoke_failed",
-                    operation=operation,
-                    model=self.model,
-                    error_type=exc.__class__.__name__,
-                    error=str(exc),
-                )
-                return None
 
         if use_cache:
             self.cache.set(cache_key, data)
@@ -535,18 +683,20 @@ class LangChainQuizProvider:
 
         log_event("llm.cache_miss", operation=operation, key=cache_key)
         try:
-            prompt = ChatPromptTemplate.from_messages(
-                [("system", system_prompt), ("human", human_prompt)]
+            prompt = self._build_prompt(
+                system_prompt=system_prompt,
+                human_prompt=human_prompt,
+                include_format_instructions=False,
             )
-            chain = (
-                prompt
-                | self.llm.bind(**self._llm_bind_kwargs(temperature))
-                | StrOutputParser()
+            text = self._invoke_text_chain(
+                operation=operation,
+                temperature=temperature,
+                prompt=prompt,
+                message_vars={"payload": json.dumps(payload, ensure_ascii=False)},
             )
-            with timed_event("llm.invoke", operation=operation, model=self.model):
-                text = chain.invoke(
-                    {"payload": json.dumps(payload, ensure_ascii=False)}
-                ).strip()
+            if text is None:
+                return None
+            text = text.strip()
 
             if text.startswith("```"):
                 text = re.sub(r"^```(?:html)?\s*", "", text)
@@ -564,6 +714,60 @@ class LangChainQuizProvider:
                 error=str(exc),
             )
             return None
+
+    def _build_prompt(
+        self,
+        system_prompt: str,
+        human_prompt: str,
+        include_format_instructions: bool,
+    ) -> ChatPromptTemplate:
+        if include_format_instructions:
+            human = "{format_instructions}\n\n" + human_prompt
+        else:
+            human = human_prompt
+        return ChatPromptTemplate.from_messages(
+            [("system", system_prompt), ("human", human)]
+        )
+
+    def _invoke_json_chain(
+        self,
+        operation: str,
+        temperature: float,
+        prompt: ChatPromptTemplate,
+        parser: JsonOutputParser,
+        message_vars: dict[str, Any],
+    ) -> dict | None:
+        if not self.llm:
+            return None
+        chain = (
+            prompt
+            | self.llm.bind(**self._llm_bind_kwargs(temperature))
+            | parser
+        )
+        with timed_event("llm.invoke", operation=operation, model=self.model):
+            parsed = chain.invoke(message_vars)
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"items": parsed}
+        return None
+
+    def _invoke_text_chain(
+        self,
+        operation: str,
+        temperature: float,
+        prompt: ChatPromptTemplate,
+        message_vars: dict[str, Any],
+    ) -> str | None:
+        if not self.llm:
+            return None
+        chain = (
+            prompt
+            | self.llm.bind(**self._llm_bind_kwargs(temperature))
+            | StrOutputParser()
+        )
+        with timed_event("llm.invoke", operation=operation, model=self.model):
+            return str(chain.invoke(message_vars))
 
     def _parse_json(self, text: str) -> dict:
         cleaned = text.strip()
@@ -1162,3 +1366,4 @@ class LangChainQuizProvider:
                 return False
 
         return True
+

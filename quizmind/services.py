@@ -20,6 +20,7 @@ from quizmind.models import (
     QuestionType,
     Quiz,
     QuizConfig,
+    SceneTurnResult,
     UserAnswer,
 )
 from quizmind.quiz_bank import QuizBank
@@ -170,7 +171,7 @@ class QuizEngine:
             return self._generate_locally(parsed, config)
 
         repaired_quiz = Quiz(
-        title=(quiz.title or f"{parsed.title} - 智能练习").strip(),
+            title=(quiz.title or f"{parsed.title} - 智能练习").strip(),
             source_summary=(quiz.source_summary or parsed.title).strip(),
             questions=sanitized_questions,
         )
@@ -272,8 +273,8 @@ class QuizEngine:
                 correct_answer = ["正确"]
         elif qtype in {QuestionType.single_choice.value, QuestionType.multiple_choice.value}:
             if not options:
-                seed = correct_answer[0] if correct_answer else "閫夐」A"
-                options = [seed, "閫夐」B", "閫夐」C", "閫夐」D"]
+                seed = correct_answer[0] if correct_answer else "选项A"
+                options = [seed, "选项B", "选项C", "选项D"]
             if not correct_answer:
                 correct_answer = [options[0]]
         else:
@@ -714,6 +715,59 @@ class GradingService:
             review_recommendations=recommendations,
             reinforcement_topics=reinforcement_topics,
         )
+
+
+class SceneInterviewService:
+    def __init__(self) -> None:
+        self.provider = LangChainQuizProvider()
+
+    def next_turn(
+        self,
+        scene_description: str,
+        transcript: list[dict[str, str]],
+        max_rounds: int = 12,
+        interview_mode: str = "guided",
+    ) -> SceneTurnResult:
+        result = self.provider.run_engineer_scene_turn(
+            scene_description=scene_description,
+            transcript=transcript,
+            max_rounds=max_rounds,
+            interview_mode=interview_mode,
+        )
+        try:
+            normalized = SceneTurnResult.model_validate(result)
+        except Exception as exc:
+            log_event("scene.turn.invalid_payload", error=str(exc))
+            normalized = SceneTurnResult(
+                engineer_message="本轮生成失败，请重试。",
+                should_end=False,
+                is_passed=False,
+                score=0,
+            )
+
+        # 无模型可用时不进入“继续追问”循环，直接结束并提示配置。
+        if normalized.assessment == "模型不可用" or any(
+            "未配置可用模型" in item for item in (normalized.weaknesses or [])
+        ):
+            return normalized.model_copy(update={"should_end": True, "is_passed": False})
+
+        # 只在“明确通过”时结束；未通过时持续追问。
+        if not normalized.is_passed:
+            message = normalized.engineer_message.strip()
+            if "？" not in message and "?" not in message:
+                message = (
+                    f"{message} 请继续说明你的核心设计权衡、故障兜底和可观测性方案。"
+                ).strip()
+            normalized = normalized.model_copy(
+                update={
+                    "should_end": False,
+                    "assessment": normalized.assessment or "尚未通过，继续追问。",
+                    "engineer_message": message,
+                }
+            )
+        else:
+            normalized = normalized.model_copy(update={"should_end": True})
+        return normalized
 
 
 def build_reinforcement_quiz(parsed: ParsedContent, report: FeedbackReport, config: QuizConfig) -> Quiz:

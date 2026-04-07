@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from enum import Enum
 from typing import Dict, List, Literal, Optional
@@ -81,7 +81,7 @@ class QuizMode(str, Enum):
     @classmethod
     def normalize(cls, raw: object) -> str:
         value = str(raw or "").strip().lower()
-        if value in {"exam", "考试模式", "鑰冭瘯妯″紡"}:
+        if value in {"exam", "考试模式"}:
             return "exam"
         return "practice"
 
@@ -226,3 +226,14 @@ class BatchSubjectiveGrade(BaseModel):
     score: float = Field(ge=0, le=100)
     feedback: str
     missing_points: List[str] = Field(default_factory=list)
+
+
+class SceneTurnResult(BaseModel):
+    engineer_message: str
+    should_end: bool = False
+    is_passed: bool = False
+    score: float = Field(default=0, ge=0, le=100)
+    assessment: str = ""
+    strengths: List[str] = Field(default_factory=list)
+    weaknesses: List[str] = Field(default_factory=list)
+    recommendations: List[str] = Field(default_factory=list)
