@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
 import math
+import os
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from typing import Dict, List, Sequence, Tuple
 
@@ -150,6 +152,15 @@ class QuizEngine:
         self.provider = LangChainQuizProvider()
         self._memory_store: MemoryStore | None = None
         self.quiz_bank = QuizBank()
+        self.last_quiz_origin = ""
+        self.strict_ai_generation = (
+            str(os.getenv("QUIZMIND_STRICT_AI_GENERATION", "false")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if self.strict_ai_generation:
+            # In strict mode, fail fast instead of stacking long upstream timeouts.
+            self.provider.quiz_gen_attempts = 1
+            self.provider.quiz_gen_concurrency = 1
 
     @property
     def memory_store(self) -> MemoryStore:
@@ -158,9 +169,41 @@ class QuizEngine:
             self._memory_store = MemoryStore()
         return self._memory_store
 
-    def _repair_quiz(self, parsed: ParsedContent, quiz: Quiz, config: QuizConfig) -> Quiz:
+    def _origin_label(self, used_ai: bool, from_saved: bool = False) -> str:
+        if used_ai:
+            return "缓存AI" if from_saved else "AI生成"
+        return "本地规则"
+
+    def _result_meta(
+        self,
+        used_ai: bool,
+        from_saved: bool,
+        record_id: str = "",
+    ) -> dict[str, object]:
+        origin_label = self._origin_label(used_ai=used_ai, from_saved=from_saved)
+        self.last_quiz_origin = origin_label
+        return {
+            "from_saved": from_saved,
+            "record_id": record_id,
+            "origin_label": origin_label,
+        }
+
+    def _repair_quiz(
+        self,
+        parsed: ParsedContent,
+        quiz: Quiz,
+        config: QuizConfig,
+        allow_local_fallback: bool = True,
+        allow_ai_generation: bool = True,
+    ) -> Quiz:
         if not quiz or not isinstance(getattr(quiz, "questions", None), list):
-            return self._generate_locally(parsed, config)
+            if allow_local_fallback:
+                return self._generate_locally(parsed, config)
+            return Quiz(
+                title=f"{parsed.title} - 智能练习",
+                source_summary=parsed.title,
+                questions=[],
+            )
 
         sanitized_questions: list[Question] = []
         used_ids: set[str] = set()
@@ -175,7 +218,13 @@ class QuizEngine:
             sanitized_questions.append(repaired)
 
         if not sanitized_questions:
-            return self._generate_locally(parsed, config)
+            if allow_local_fallback:
+                return self._generate_locally(parsed, config)
+            return Quiz(
+                title=f"{parsed.title} - 智能练习",
+                source_summary=parsed.title,
+                questions=[],
+            )
 
         repaired_quiz = Quiz(
             title=(quiz.title or f"{parsed.title} - 智能练习").strip(),
@@ -189,20 +238,21 @@ class QuizEngine:
             return repaired_quiz.model_copy(update={"questions": repaired_quiz.questions[: config.question_count]})
 
         filler: list[Question] = []
-        for _ in range(3):
-            try:
-                llm_quiz = self.provider.generate_quiz(parsed, config)
-            except Exception:
-                llm_quiz = None
-            if not llm_quiz or not llm_quiz.questions:
-                continue
-            for idx, item in enumerate(llm_quiz.questions, start=1):
-                repaired = self._repair_question(item, idx)
-                filler.append(repaired)
-            if len(filler) >= config.question_count:
-                break
+        if allow_ai_generation and self.provider.llm:
+            for _ in range(3):
+                try:
+                    llm_quiz = self.provider.generate_quiz(parsed, config)
+                except Exception:
+                    llm_quiz = None
+                if not llm_quiz or not llm_quiz.questions:
+                    continue
+                for idx, item in enumerate(llm_quiz.questions, start=1):
+                    repaired = self._repair_question(item, idx)
+                    filler.append(repaired)
+                if len(filler) >= config.question_count:
+                    break
 
-        if not filler:
+        if not filler and allow_local_fallback:
             filler = self._generate_locally(parsed, config).questions
 
         existing_ids = {q.id for q in repaired_quiz.questions}
@@ -217,6 +267,27 @@ class QuizEngine:
             merged.append(item)
             existing_ids.add(item.id)
             existing_sigs.add(sig)
+
+        # In local-only mode, strict dedup can leave too few questions for sparse source text.
+        # Top up with explicit local variants to satisfy configured question_count.
+        if len(merged) < config.question_count and allow_local_fallback:
+            relaxed_pool = filler or self._generate_locally(parsed, config).questions
+            idx = 0
+            while relaxed_pool and len(merged) < config.question_count:
+                base = self._repair_question(
+                    relaxed_pool[idx % len(relaxed_pool)],
+                    idx + 1,
+                )
+                variant_no = len(merged) + 1
+                merged.append(
+                    base.model_copy(
+                        update={
+                            "id": f"{base.id}_R{variant_no}",
+                            "prompt": f"{base.prompt}（变体{variant_no}）",
+                        }
+                    )
+                )
+                idx += 1
 
         return repaired_quiz.model_copy(update={"questions": merged[: config.question_count]})
 
@@ -315,32 +386,139 @@ class QuizEngine:
         config: QuizConfig,
         use_saved_first: bool = True,
         allow_ai_generation: bool = True,
+        learning_style: str = "teacher",
     ) -> Tuple[ParsedContent, Quiz, Dict[str, object]]:
-        signature = self.quiz_bank.build_signature(source, source_type, config)
+        local_fallback_allowed = not (allow_ai_generation and self.strict_ai_generation)
+        signature = self.quiz_bank.build_signature(
+            source,
+            source_type,
+            config,
+            learning_style=learning_style,
+        )
         if use_saved_first:
             found = self.quiz_bank.find_by_signature(signature)
             if found:
                 parsed, quiz, item = found
-                repaired = self._repair_quiz(parsed, quiz, config)
-                if self._quiz_matches_type_targets(repaired, config) and len(repaired.questions) >= config.question_count:
-                    log_event("quiz_bank.hit", source_name=source_name, record_id=item.get("id", ""))
-                    return parsed, repaired, {"from_saved": True, "record_id": item.get("id", "")}
-                log_event(
-                    "quiz_bank.hit_incompatible",
-                    source_name=source_name,
-                    record_id=item.get("id", ""),
-                    reason="question_type_distribution_mismatch",
-                )
+                if (
+                    allow_ai_generation
+                    and self.strict_ai_generation
+                    and not bool(item.get("used_ai", False))
+                ):
+                    log_event(
+                        "quiz_bank.skip_non_ai_record",
+                        source_name=source_name,
+                        record_id=item.get("id", ""),
+                    )
+                else:
+                    repaired = self._repair_quiz(
+                        parsed,
+                        quiz,
+                        config,
+                        allow_local_fallback=local_fallback_allowed,
+                        allow_ai_generation=allow_ai_generation,
+                    )
+                    if (
+                        self._quiz_matches_type_targets(repaired, config)
+                        and len(repaired.questions) >= config.question_count
+                        and self._quiz_passes_quality_baseline(repaired)
+                        and self._quiz_passes_ai_review(repaired, parsed.cleaned_text, config)
+                    ):
+                        log_event("quiz_bank.hit", source_name=source_name, record_id=item.get("id", ""))
+                        return parsed, repaired, self._result_meta(
+                            used_ai=bool(item.get("used_ai", False)),
+                            from_saved=True,
+                            record_id=str(item.get("id", "")),
+                        )
+                    log_event(
+                        "quiz_bank.hit_incompatible",
+                        source_name=source_name,
+                        record_id=item.get("id", ""),
+                        reason="question_quality_or_type_mismatch",
+                    )
 
         if allow_ai_generation:
-            parsed, quiz = self.generate_from_source(source, source_type, config)
-            used_ai = True
+            # More robust than one-shot "parse+quiz" generation: split into two AI stages.
+            # This avoids hard failure when the combined call times out under strict mode.
+            try:
+                parsed = self.provider.parse_content(source, source_type)
+            except Exception as exc:
+                log_event(
+                    "service.generate_or_load.parse_fallback",
+                    source_name=source_name,
+                    error=str(exc),
+                )
+                parsed = fallback_parse_content(source, source_type)
+            quiz = self.generate_quiz(
+                parsed,
+                config,
+                allow_ai_generation=True,
+                learning_style=learning_style,
+            )
+            used_ai = self.last_quiz_origin != "本地规则"
         else:
             parsed = fallback_parse_content(source, source_type)
             quiz = self._generate_locally(parsed, config)
             used_ai = False
+            self.last_quiz_origin = "本地规则"
 
-        quiz = self._repair_quiz(parsed, quiz, config)
+        quiz = self._repair_quiz(
+            parsed,
+            quiz,
+            config,
+            allow_local_fallback=local_fallback_allowed,
+            allow_ai_generation=allow_ai_generation,
+        )
+        if allow_ai_generation and self._quiz_passes_quality_baseline(quiz):
+            quiz = self._repair_quiz_by_ai_review(
+                parsed,
+                quiz,
+                config,
+                learning_style,
+            )
+        if allow_ai_generation and (
+            not self._quiz_passes_quality_baseline(quiz)
+            or not self._quiz_passes_ai_review(quiz, parsed.cleaned_text, config)
+        ):
+            try:
+                improved = self.generate_quiz(
+                    parsed,
+                    config,
+                    allow_ai_generation=True,
+                    learning_style=learning_style,
+                )
+                quiz = self._repair_quiz(
+                    parsed,
+                    improved,
+                    config,
+                    allow_local_fallback=local_fallback_allowed,
+                    allow_ai_generation=True,
+                )
+            except Exception as exc:
+                log_event(
+                    "quiz.quality_retry.failed",
+                    source_name=source_name,
+                    error=str(exc),
+                )
+        final_quality_ok = self._quiz_passes_quality_baseline(quiz)
+        if allow_ai_generation and final_quality_ok:
+            final_quality_ok = self._quiz_passes_ai_review(
+                quiz, parsed.cleaned_text, config
+            )
+        if not final_quality_ok:
+            if allow_ai_generation and self.strict_ai_generation:
+                raise RuntimeError(
+                    "AI题目质量未达标，已拒绝回退到本地规则出题。请检查模型配置后重试。"
+                )
+            log_event(
+                "quiz.save.skipped_low_quality",
+                source_name=source_name,
+                question_count=len(quiz.questions),
+            )
+            return parsed, quiz, self._result_meta(
+                used_ai=used_ai,
+                from_saved=False,
+            )
+
         record_id = self.quiz_bank.save(
             signature=signature,
             source_name=source_name,
@@ -349,23 +527,79 @@ class QuizEngine:
             parsed=parsed,
             quiz=quiz,
         )
-        return parsed, quiz, {"from_saved": False, "record_id": record_id}
+        return parsed, quiz, self._result_meta(
+            used_ai=used_ai,
+            from_saved=False,
+            record_id=record_id,
+        )
 
     def generate_quiz(
         self,
         parsed: ParsedContent,
         config: QuizConfig,
         allow_ai_generation: bool = True,
+        learning_style: str = "teacher",
     ) -> Quiz:
+        local_fallback_allowed = not (allow_ai_generation and self.strict_ai_generation)
         with timed_event("service.generate_quiz", title=parsed.title, question_count=config.question_count):
             if allow_ai_generation:
+                if self.strict_ai_generation and not self.provider.llm:
+                    raise RuntimeError("未检测到可用LLM，严格AI出题模式下无法生成题目。")
                 try:
-                    llm_quiz = self.provider.generate_quiz(parsed, config)
+                    llm_quiz = self.provider.generate_quiz(
+                        parsed,
+                        config,
+                        learning_style=learning_style,
+                    )
                     if llm_quiz and llm_quiz.questions:
-                        return self._repair_quiz(parsed, llm_quiz, config)
+                        repaired = self._repair_quiz(
+                            parsed,
+                            llm_quiz,
+                            config,
+                            allow_local_fallback=local_fallback_allowed,
+                            allow_ai_generation=allow_ai_generation,
+                        )
+                        if self._quiz_passes_quality_baseline(repaired):
+                            repaired = self._repair_quiz_by_ai_review(
+                                parsed,
+                                repaired,
+                                config,
+                                learning_style,
+                            )
+                        if self._quiz_passes_quality_baseline(repaired) and self._quiz_passes_ai_review(
+                            repaired, parsed.cleaned_text, config
+                        ):
+                            self.last_quiz_origin = "AI生成"
+                            return repaired
+                        log_event(
+                            "service.generate_quiz.low_quality_retry",
+                            title=parsed.title,
+                            reason="baseline_not_passed",
+                        )
+                    parallel_quiz = self._generate_quiz_by_parallel_questions(
+                        parsed,
+                        config,
+                        learning_style,
+                    )
+                    if parallel_quiz and parallel_quiz.questions:
+                        repaired = self._repair_quiz(
+                            parsed,
+                            parallel_quiz,
+                            config,
+                            allow_local_fallback=local_fallback_allowed,
+                            allow_ai_generation=False,
+                        )
+                        if self._quiz_passes_quality_baseline(repaired):
+                            self.last_quiz_origin = "AI生成"
+                            return repaired
                 except Exception as exc:
                     log_event("service.generate_quiz.provider_error", title=parsed.title, error=str(exc))
+                    if self.strict_ai_generation:
+                        raise RuntimeError(f"AI出题失败：{exc}") from exc
+            if allow_ai_generation and self.strict_ai_generation:
+                raise RuntimeError("AI题目质量未达标，严格AI出题模式下已终止。")
             log_event("service.generate_quiz.fallback_local", title=parsed.title)
+            self.last_quiz_origin = "本地规则"
             return self._generate_locally(parsed, config)
 
     def generate_from_source(
@@ -373,15 +607,35 @@ class QuizEngine:
         source: str,
         source_type: str,
         config: QuizConfig,
+        learning_style: str = "teacher",
     ) -> tuple[ParsedContent, Quiz]:
         with timed_event("service.generate_from_source", source_type=source_type):
+            if self.strict_ai_generation and not self.provider.llm:
+                raise RuntimeError("未检测到可用LLM，严格AI出题模式下无法从源内容生成题目。")
             try:
-                parsed, quiz = self.provider.generate_quiz_from_source(source, source_type, config)
+                parsed, quiz = self.provider.generate_quiz_from_source(
+                    source,
+                    source_type,
+                    config,
+                    learning_style=learning_style,
+                )
                 if quiz and quiz.questions:
-                    return parsed, self._repair_quiz(parsed, quiz, config)
+                    self.last_quiz_origin = "AI生成"
+                    return parsed, self._repair_quiz(
+                        parsed,
+                        quiz,
+                        config,
+                        allow_local_fallback=not self.strict_ai_generation,
+                        allow_ai_generation=True,
+                    )
             except Exception as exc:
                 log_event("service.generate_from_source.provider_error", source_type=source_type, error=str(exc))
+                if self.strict_ai_generation:
+                    raise RuntimeError(f"AI出题失败：{exc}") from exc
+            if self.strict_ai_generation:
+                raise RuntimeError("AI未返回有效题目，严格AI出题模式下已终止。")
             fallback_parsed = fallback_parse_content(source, source_type)
+            self.last_quiz_origin = "本地规则"
             return fallback_parsed, self._generate_locally(fallback_parsed, config)
 
     def generate_from_memory(
@@ -390,9 +644,15 @@ class QuizEngine:
         query: str = "",
         top_k: int = 4,
         allow_ai_generation: bool = True,
+        learning_style: str = "teacher",
     ) -> tuple[ParsedContent, Quiz]:
         parsed = self.memory_store.build_memory_content(query=query, top_k=top_k)
-        return parsed, self.generate_quiz(parsed, config, allow_ai_generation=allow_ai_generation)
+        return parsed, self.generate_quiz(
+            parsed,
+            config,
+            allow_ai_generation=allow_ai_generation,
+            learning_style=learning_style,
+        )
 
     def save_memory(self, parsed: ParsedContent):
         return self.memory_store.add_parsed_content(parsed)
@@ -465,6 +725,274 @@ class QuizEngine:
         if not required_types:
             return True
         return required_types.issubset(actual_types)
+
+    def _quiz_passes_quality_baseline(self, quiz: Quiz) -> bool:
+        if not quiz or not quiz.questions:
+            return False
+
+        prompts = []
+        for q in quiz.questions:
+            prompt = str(q.prompt or "").strip()
+            explanation = str(q.explanation or "").strip()
+            if len(prompt) < 10 or len(explanation) < 10:
+                return False
+            if q.question_type.value in {
+                QuestionType.single_choice.value,
+                QuestionType.multiple_choice.value,
+            }:
+                options = [str(x).strip() for x in (q.options or []) if str(x).strip()]
+                if len(options) < 4:
+                    return False
+                generic = sum(
+                    1
+                    for x in options
+                    if re.search(r"^(选项|option)\s*[A-D]?$", x, flags=re.IGNORECASE)
+                )
+                if generic >= 2:
+                    return False
+            prompts.append(re.sub(r"[^\w\u4e00-\u9fff]", "", prompt.lower()))
+
+        dedup_ratio = len(set(prompts)) / max(1, len(prompts))
+        return dedup_ratio >= 0.8
+
+    def _quiz_passes_ai_review(
+        self,
+        quiz: Quiz,
+        source_text: str,
+        config: QuizConfig,
+    ) -> bool:
+        review = self._run_ai_review(quiz, source_text, config)
+        return bool(review is None or review.get("pass", False))
+
+    def _run_ai_review(
+        self,
+        quiz: Quiz,
+        source_text: str,
+        config: QuizConfig,
+    ) -> dict | None:
+        if not self.provider.ai_quality_review:
+            return None
+        try:
+            review = self.provider.review_quiz_quality(quiz, source_text, config)
+        except Exception as exc:
+            log_event("quiz.ai_review.error", error=str(exc))
+            return None
+
+        passed = bool(review.get("pass", False))
+        if not passed:
+            log_event(
+                "quiz.ai_review.rejected",
+                score=review.get("overall_score", 0),
+                issue_count=len(review.get("issues", [])),
+                summary=review.get("summary", ""),
+            )
+        return review
+
+    def _regenerate_single_question(
+        self,
+        parsed: ParsedContent,
+        question: Question,
+        learning_style: str,
+    ) -> Question | None:
+        if not self.provider.llm:
+            return None
+        focus_points = _select_focus_points(parsed, list(question.knowledge_tags or []), fallback_count=2)
+        focused = _build_focused_parsed_content(parsed, focus_points, f"题目修复 {question.id}")
+        type_mix = {
+            QuestionType.single_choice.value: 0,
+            QuestionType.multiple_choice.value: 0,
+            QuestionType.fill_blank.value: 0,
+            QuestionType.short_answer.value: 0,
+            QuestionType.true_false.value: 0,
+        }
+        type_mix[question.question_type.value] = 100
+        diff_mix = {"easy": 0, "medium": 0, "hard": 0}
+        diff_mix[question.difficulty.value] = 100
+        single_config = QuizConfig(
+            question_count=1,
+            difficulty_mix=diff_mix,
+            type_mix=type_mix,
+        )
+        candidate = self.provider.generate_quiz(
+            focused,
+            single_config,
+            learning_style=learning_style,
+        )
+        if not candidate or not candidate.questions:
+            return None
+        picked = next(
+            (item for item in candidate.questions if item.question_type == question.question_type),
+            candidate.questions[0],
+        )
+        repaired = self._repair_question(picked, 1)
+        return repaired.model_copy(update={"id": question.id})
+
+    def _generate_single_question_candidate(
+        self,
+        parsed: ParsedContent,
+        question_type: QuestionType,
+        difficulty: Difficulty,
+        question_id: str,
+        point_index: int,
+        learning_style: str,
+    ) -> Question | None:
+        if not self.provider.llm:
+            return None
+        points = parsed.knowledge_points or []
+        focus_names: list[str] = []
+        if points:
+            focus_names.append(points[point_index % len(points)].name)
+            if len(points) > 1:
+                focus_names.append(points[(point_index + 1) % len(points)].name)
+        focus_points = _select_focus_points(parsed, focus_names, fallback_count=2)
+        focused = _build_focused_parsed_content(parsed, focus_points, f"单题生成 {question_id}")
+        type_mix = {member.value: 0 for member in QuestionType}
+        type_mix[question_type.value] = 100
+        diff_mix = {member.value: 0 for member in Difficulty}
+        diff_mix[difficulty.value] = 100
+        single_config = QuizConfig(
+            question_count=1,
+            difficulty_mix=diff_mix,
+            type_mix=type_mix,
+        )
+        candidate = self.provider.generate_quiz(
+            focused,
+            single_config,
+            learning_style=learning_style,
+        )
+        if not candidate or not candidate.questions:
+            return None
+        picked = next(
+            (item for item in candidate.questions if item.question_type == question_type),
+            candidate.questions[0],
+        )
+        repaired = self._repair_question(picked, 1)
+        return repaired.model_copy(update={"id": question_id, "difficulty": difficulty})
+
+    def _generate_quiz_by_parallel_questions(
+        self,
+        parsed: ParsedContent,
+        config: QuizConfig,
+        learning_style: str,
+    ) -> Quiz | None:
+        if not self.provider.llm:
+            return None
+        type_targets = self._distribution_targets(config.question_count, config.type_mix)
+        diff_targets = self._distribution_targets(config.question_count, config.difficulty_mix)
+        plan: list[tuple[str, QuestionType, Difficulty]] = []
+        question_no = 1
+        for qtype_name, count in type_targets.items():
+            for _ in range(count):
+                plan.append(
+                    (
+                        f"Q{question_no:03d}",
+                        QuestionType(qtype_name),
+                        self._next_difficulty(diff_targets),
+                    )
+                )
+                question_no += 1
+        if not plan:
+            return None
+
+        questions: list[Question | None] = [None] * len(plan)
+        max_workers = min(4, len(plan))
+        with ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="quiz-single"
+        ) as pool:
+            future_map = {
+                pool.submit(
+                    self._generate_single_question_candidate,
+                    parsed,
+                    qtype,
+                    difficulty,
+                    question_id,
+                    index,
+                    learning_style,
+                ): index
+                for index, (question_id, qtype, difficulty) in enumerate(plan)
+            }
+            for future in as_completed(future_map):
+                index = future_map[future]
+                try:
+                    questions[index] = future.result()
+                except Exception as exc:
+                    log_event(
+                        "quiz.parallel_single.error",
+                        question_id=plan[index][0],
+                        error=str(exc),
+                    )
+
+        built_questions = [question for question in questions if question]
+        if not built_questions:
+            return None
+        log_event(
+            "quiz.parallel_single.complete",
+            requested=len(plan),
+            generated=len(built_questions),
+        )
+        return Quiz(
+            title=f"{parsed.title} - 智能练习",
+            source_summary=parsed.title,
+            questions=built_questions,
+        )
+
+    def _repair_quiz_by_ai_review(
+        self,
+        parsed: ParsedContent,
+        quiz: Quiz,
+        config: QuizConfig,
+        learning_style: str,
+    ) -> Quiz:
+        review = self._run_ai_review(quiz, parsed.cleaned_text, config)
+        if not review or bool(review.get("pass", False)):
+            return quiz
+
+        issue_ids = [
+            str(item.get("question_id", "")).strip()
+            for item in (review.get("issues", []) or [])
+            if str(item.get("question_id", "")).strip()
+        ]
+        target_ids = list(dict.fromkeys(issue_ids))
+        if not target_ids:
+            return quiz
+
+        question_map = {q.id: q for q in quiz.questions}
+        replacements: dict[str, Question] = {}
+        max_workers = min(3, len(target_ids))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="quiz-fix") as pool:
+            future_map = {
+                pool.submit(
+                    self._regenerate_single_question,
+                    parsed,
+                    question_map[qid],
+                    learning_style,
+                ): qid
+                for qid in target_ids
+                if qid in question_map
+            }
+            for future in as_completed(future_map):
+                qid = future_map[future]
+                try:
+                    repaired = future.result()
+                except Exception as exc:
+                    log_event("quiz.question_regen.error", question_id=qid, error=str(exc))
+                    repaired = None
+                if repaired:
+                    replacements[qid] = repaired
+
+        if not replacements:
+            return quiz
+
+        updated_questions = [replacements.get(q.id, q) for q in quiz.questions]
+        repaired_quiz = Quiz(
+            title=quiz.title,
+            source_summary=quiz.source_summary,
+            questions=updated_questions,
+        )
+        followup_review = self._run_ai_review(repaired_quiz, parsed.cleaned_text, config)
+        if followup_review and not bool(followup_review.get("pass", False)):
+            return quiz
+        return repaired_quiz
 
     def _distribution_targets(self, total: int, mix: Dict[str, int]) -> Dict[str, int]:
         counts = {name: max(0, math.floor(total * ratio / 100)) for name, ratio in mix.items()}
@@ -583,7 +1111,12 @@ class GradingService:
     def __init__(self) -> None:
         self.provider = LangChainQuizProvider()
 
-    def grade(self, quiz: Quiz, answers: Sequence[UserAnswer]) -> FeedbackReport:
+    def grade(
+        self,
+        quiz: Quiz,
+        answers: Sequence[UserAnswer],
+        learning_style: str = "teacher",
+    ) -> FeedbackReport:
         with timed_event("service.grade", quiz_title=quiz.title, answers=len(answers)):
             answer_map = {item.question_id: item.answer for item in answers}
             question_map = {question.id: question for question in quiz.questions}
@@ -594,7 +1127,10 @@ class GradingService:
                 for question in quiz.questions
             ]
             try:
-                llm_grades = self.provider.grade_subjective_batch(all_pairs)
+                llm_grades = self.provider.grade_subjective_batch(
+                    all_pairs,
+                    learning_style=learning_style,
+                )
             except Exception as exc:
                 log_event("service.grade.llm_batch_error", error=str(exc))
                 llm_grades = {}
@@ -611,29 +1147,79 @@ class GradingService:
                 if llm_grade:
                     objective = question.question_type != QuestionType.short_answer
                     threshold = 99.0 if objective else 60.0
+                    is_correct = llm_grade.score >= threshold
+                    error_category = self._normalize_error_category(
+                        llm_grade.error_category,
+                        question=question,
+                        answer=user_answer,
+                        is_correct=is_correct,
+                    )
+                    score_breakdown = (
+                        llm_grade.score_breakdown
+                        if llm_grade.score_breakdown
+                        else self._default_breakdown(
+                            score=llm_grade.score,
+                            objective=objective,
+                        )
+                    )
+                    structured_explanation = (
+                        llm_grade.structured_explanation.strip()
+                        if llm_grade.structured_explanation
+                        else self._build_structured_explanation(
+                            question=question,
+                            user_answer=user_answer,
+                            is_correct=is_correct,
+                            feedback=llm_grade.feedback or question.explanation,
+                            error_category=error_category,
+                            learning_style=learning_style,
+                        )
+                    )
                     result = QuestionResult(
                         question_id=question.id,
-                        is_correct=llm_grade.score >= threshold,
+                        is_correct=is_correct,
                         score=llm_grade.score,
                         user_answer=user_answer,
                         correct_answer=question.correct_answer,
                         feedback=llm_grade.feedback or question.explanation,
                         missing_points=llm_grade.missing_points,
+                        error_category=error_category,
+                        score_breakdown=score_breakdown,
+                        structured_explanation=structured_explanation,
                     )
                 elif question.question_type == QuestionType.short_answer:
-                    result = self._grade_subjective(question, user_answer, None)
+                    result = self._grade_subjective(
+                        question,
+                        user_answer,
+                        None,
+                        learning_style=learning_style,
+                    )
                 else:
-                    result = self._grade_objective(question, user_answer)
+                    result = self._grade_objective(
+                        question,
+                        user_answer,
+                        learning_style=learning_style,
+                    )
                 results.append(result)
 
             return self._build_report(question_map, results)
 
-    def _grade_objective(self, question: Question, answer: List[str]) -> QuestionResult:
+    def _grade_objective(
+        self,
+        question: Question,
+        answer: List[str],
+        learning_style: str = "teacher",
+    ) -> QuestionResult:
         normalized_user = {item.strip() for item in answer if item.strip()}
         normalized_correct = {item.strip() for item in question.correct_answer if item.strip()}
         is_correct = normalized_user == normalized_correct
         score = 100.0 if is_correct else 0.0
         feedback = "回答正确。" if is_correct else f"正确答案：{', '.join(question.correct_answer)}。"
+        error_category = self._normalize_error_category(
+            "",
+            question=question,
+            answer=answer,
+            is_correct=is_correct,
+        )
         return QuestionResult(
             question_id=question.id,
             is_correct=is_correct,
@@ -642,18 +1228,53 @@ class GradingService:
             correct_answer=question.correct_answer,
             feedback=feedback + question.explanation,
             missing_points=[] if is_correct else question.reference_points,
+            error_category=error_category,
+            score_breakdown=self._default_breakdown(score=score, objective=True),
+            structured_explanation=self._build_structured_explanation(
+                question=question,
+                user_answer=answer,
+                is_correct=is_correct,
+                feedback=feedback + question.explanation,
+                error_category=error_category,
+                learning_style=learning_style,
+            ),
         )
 
-    def _grade_subjective(self, question: Question, answer: List[str], batch_grade=None) -> QuestionResult:
+    def _grade_subjective(
+        self,
+        question: Question,
+        answer: List[str],
+        batch_grade=None,
+        learning_style: str = "teacher",
+    ) -> QuestionResult:
         if batch_grade:
+            is_correct = batch_grade.score >= 60
+            error_category = self._normalize_error_category(
+                batch_grade.error_category,
+                question=question,
+                answer=answer,
+                is_correct=is_correct,
+            )
             return QuestionResult(
                 question_id=question.id,
-                is_correct=batch_grade.score >= 60,
+                is_correct=is_correct,
                 score=batch_grade.score,
                 user_answer=answer,
                 correct_answer=question.correct_answer,
                 feedback=batch_grade.feedback,
                 missing_points=batch_grade.missing_points,
+                error_category=error_category,
+                score_breakdown=batch_grade.score_breakdown
+                or self._default_breakdown(score=batch_grade.score, objective=False),
+                structured_explanation=batch_grade.structured_explanation
+                or self._build_structured_explanation(
+                    question=question,
+                    user_answer=answer,
+                    is_correct=is_correct,
+                    feedback=batch_grade.feedback,
+                    error_category=error_category,
+                    learning_style=learning_style,
+                ),
             )
 
         text = " ".join(answer)
@@ -661,14 +1282,151 @@ class GradingService:
         reference = set(question.reference_points)
         overlap = len(tokens & reference)
         score = min(100.0, 40.0 + overlap * 20.0) if text.strip() else 0.0
+        is_correct = score >= 60
+        feedback = "覆盖较完整。" if score >= 80 else "答案覆盖不够完整，建议补充关键概念。"
+        error_category = self._normalize_error_category(
+            "",
+            question=question,
+            answer=answer,
+            is_correct=is_correct,
+        )
         return QuestionResult(
             question_id=question.id,
-            is_correct=score >= 60,
+            is_correct=is_correct,
             score=score,
             user_answer=answer,
             correct_answer=question.correct_answer,
-            feedback="覆盖较完整。" if score >= 80 else "答案覆盖不够完整，建议补充关键概念。",
+            feedback=feedback,
             missing_points=sorted(reference - tokens),
+            error_category=error_category,
+            score_breakdown=self._default_breakdown(score=score, objective=False),
+            structured_explanation=self._build_structured_explanation(
+                question=question,
+                user_answer=answer,
+                is_correct=is_correct,
+                feedback=feedback,
+                error_category=error_category,
+                learning_style=learning_style,
+            ),
+        )
+
+    def _normalize_error_category(
+        self,
+        raw_category: str,
+        question: Question,
+        answer: List[str],
+        is_correct: bool,
+    ) -> str:
+        if is_correct:
+            return "none"
+
+        aliases = {
+            "concept_unclear": "concept_unclear",
+            "概念不清": "concept_unclear",
+            "careless_mistake": "careless_mistake",
+            "粗心错误": "careless_mistake",
+            "reasoning_error": "reasoning_error",
+            "推理错误": "reasoning_error",
+            "knowledge_forgotten": "knowledge_forgotten",
+            "知识遗忘": "knowledge_forgotten",
+            "expression_issue": "expression_issue",
+            "表达问题": "expression_issue",
+            "none": "none",
+        }
+        normalized = aliases.get(str(raw_category or "").strip().lower(), "")
+        if normalized:
+            return normalized
+        return self._rule_based_error_category(question, answer)
+
+    def _rule_based_error_category(self, question: Question, answer: List[str]) -> str:
+        text = " ".join(answer).strip()
+        if not text:
+            return "knowledge_forgotten"
+
+        answer_token_count = len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+", text))
+        if question.question_type == QuestionType.short_answer:
+            if answer_token_count <= 5:
+                return "knowledge_forgotten"
+            ref = set(question.reference_points or [])
+            if ref:
+                tokens = set(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", text))
+                hit = len(tokens & ref)
+                if hit == 0:
+                    return "concept_unclear"
+                if hit < max(1, len(ref) // 2):
+                    return "reasoning_error"
+            return "expression_issue"
+
+        normalized_user = {item.strip() for item in answer if item.strip()}
+        normalized_correct = {item.strip() for item in question.correct_answer if item.strip()}
+        if normalized_user and normalized_user != normalized_correct:
+            if question.question_type in {
+                QuestionType.single_choice,
+                QuestionType.true_false,
+            }:
+                return "careless_mistake"
+            return "reasoning_error"
+        return "concept_unclear"
+
+    def _default_breakdown(self, score: float, objective: bool) -> dict[str, float]:
+        if objective:
+            return {
+                "correctness": 10.0 if score >= 99 else 0.0,
+                "completeness": 10.0 if score >= 99 else 0.0,
+                "clarity": 8.0 if score >= 99 else 3.0,
+            }
+        scaled = max(0.0, min(100.0, score)) / 10.0
+        completeness = min(10.0, round(scaled + 0.5, 1))
+        clarity = min(10.0, round(max(2.0, scaled), 1))
+        return {
+            "correctness": round(scaled, 1),
+            "completeness": completeness,
+            "clarity": clarity,
+        }
+
+    def _build_structured_explanation(
+        self,
+        question: Question,
+        user_answer: List[str],
+        is_correct: bool,
+        feedback: str,
+        error_category: str,
+        learning_style: str = "teacher",
+    ) -> str:
+        user_text = "、".join(user_answer) if user_answer else "未作答"
+        correct_text = "、".join(question.correct_answer) if question.correct_answer else "无"
+        options_text = "；".join(question.options) if question.options else "本题无选项"
+        common_pitfall = {
+            "concept_unclear": "容易把相近概念混为一谈，导致关键定义判断出错。",
+            "careless_mistake": "容易因为忽略限定词或选项细节而误选。",
+            "reasoning_error": "中间推理链不完整，结论与题干证据不一致。",
+            "knowledge_forgotten": "关键知识点回忆不足，导致无法完成作答。",
+            "expression_issue": "思路可能正确，但表达不完整，导致得分受限。",
+            "none": "本题已掌握，注意保持稳定准确率。",
+        }.get(error_category, "建议回到知识点定义与典型例题，做一次对照复盘。")
+        transfer = (
+            f"把题干中的核心概念替换为同类场景，再判断结论是否仍成立。"
+            if question.question_type != QuestionType.short_answer
+            else "尝试用“定义-条件-结论”三段式重写一次答案。"
+        )
+        style = (learning_style or "").strip().lower()
+        why_other = "本题选项：{options}。除正确答案外，其余选项与题干关键条件不完全匹配。"
+        if style == "concise":
+            feedback = feedback.split("。")[0].strip() + "。"
+            common_pitfall = common_pitfall.split("，")[0] + "。"
+            why_other = "错误选项不满足题干关键条件。"
+            transfer = "再做1题同类型变式，确保不再犯同类错误。"
+        elif style == "interviewer":
+            why_other = "其余选项要么违反题干约束，要么缺少可验证依据，不能用于生产级决策。"
+            common_pitfall = f"{common_pitfall} 需要给出可验证依据与边界条件。"
+            transfer = "给出更严谨的边界条件与反例，并说明为何你的结论依旧成立。"
+        return (
+            f"【答案】\n正确答案是：{correct_text}\n\n"
+            f"【为什么选这个】\n你的作答：{user_text}。{feedback}\n\n"
+            f"【为什么其他选项错】\n{why_other.format(options=options_text)}\n\n"
+            f"【常见误区】\n{common_pitfall}\n\n"
+            f"【知识点总结】\n本题考查：{'、'.join(question.knowledge_tags) or '核心知识点'}。\n\n"
+            f"【举一反三】\n{transfer}"
         )
 
     def _build_report(self, question_map: Dict[str, Question], results: List[QuestionResult]) -> FeedbackReport:
@@ -777,17 +1535,56 @@ class SceneInterviewService:
         return normalized
 
 
-def build_reinforcement_quiz(parsed: ParsedContent, report: FeedbackReport, config: QuizConfig) -> Quiz:
-    focus_points = [point for point in parsed.knowledge_points if point.name in set(report.reinforcement_topics)] or parsed.knowledge_points[:3]
-    focused = ParsedContent(
-        title=f"{parsed.title} - 强化训练",
+def _build_auxiliary_engine(strict_ai_generation: bool) -> QuizEngine:
+    engine = QuizEngine()
+    engine.strict_ai_generation = strict_ai_generation
+    return engine
+
+
+def _build_focused_parsed_content(
+    parsed: ParsedContent,
+    focus_points: list,
+    title_suffix: str,
+) -> ParsedContent:
+    return ParsedContent(
+        title=f"{parsed.title} - {title_suffix}",
         source_type=parsed.source_type,
         cleaned_text=parsed.cleaned_text,
         segments=[point.summary for point in focus_points],
         knowledge_points=focus_points,
         concepts=[point.name for point in focus_points],
     )
-    return QuizEngine().generate_quiz(
+
+
+def _select_focus_points(
+    parsed: ParsedContent,
+    focus_topics: list[str],
+    fallback_count: int,
+) -> list:
+    focus_set = {str(item).strip() for item in focus_topics if str(item).strip()}
+    if focus_set:
+        focus_points = [
+            point
+            for point in parsed.knowledge_points
+            if point.name in focus_set
+            or any(keyword in focus_set for keyword in point.keywords)
+        ]
+        if focus_points:
+            return focus_points
+    return parsed.knowledge_points[:fallback_count]
+
+
+def build_reinforcement_quiz(
+    parsed: ParsedContent,
+    report: FeedbackReport,
+    config: QuizConfig,
+    learning_style: str = "teacher",
+    strict_ai_generation: bool = True,
+) -> Quiz:
+    focus_points = _select_focus_points(parsed, report.reinforcement_topics, fallback_count=3)
+    focused = _build_focused_parsed_content(parsed, focus_points, "强化训练")
+    engine = _build_auxiliary_engine(strict_ai_generation)
+    return engine.generate_quiz(
         focused,
         QuizConfig(
             question_count=min(max(5, len(focus_points) * 2), config.question_count),
@@ -801,6 +1598,7 @@ def build_reinforcement_quiz(parsed: ParsedContent, report: FeedbackReport, conf
             },
         ),
         allow_ai_generation=True,
+        learning_style=learning_style,
     )
 
 
@@ -810,33 +1608,19 @@ def build_targeted_quiz(
     config: QuizConfig,
     question_count: int | None = None,
     allow_ai_generation: bool = True,
+    difficulty_mix: dict[str, int] | None = None,
+    type_mix: dict[str, int] | None = None,
+    learning_style: str = "teacher",
+    strict_ai_generation: bool = True,
 ) -> Quiz:
-    focus_set = {str(item).strip() for item in focus_topics if str(item).strip()}
-    if focus_set:
-        focus_points = [
-            point
-            for point in parsed.knowledge_points
-            if point.name in focus_set
-            or any(keyword in focus_set for keyword in point.keywords)
-        ]
-    else:
-        focus_points = []
-    if not focus_points:
-        focus_points = parsed.knowledge_points[:4]
-
-    focused = ParsedContent(
-        title=f"{parsed.title} - 定向练习",
-        source_type=parsed.source_type,
-        cleaned_text=parsed.cleaned_text,
-        segments=[point.summary for point in focus_points],
-        knowledge_points=focus_points,
-        concepts=[point.name for point in focus_points],
-    )
+    focus_points = _select_focus_points(parsed, focus_topics, fallback_count=4)
+    focused = _build_focused_parsed_content(parsed, focus_points, "定向练习")
     total = question_count or min(max(6, len(focus_points) * 3), config.question_count + 4)
     targeted_config = QuizConfig(
         question_count=max(5, min(30, total)),
-        difficulty_mix={"easy": 25, "medium": 50, "hard": 25},
-        type_mix={
+        difficulty_mix=difficulty_mix or {"easy": 25, "medium": 50, "hard": 25},
+        type_mix=type_mix
+        or {
             "single_choice": 35,
             "multiple_choice": 25,
             "fill_blank": 20,
@@ -844,9 +1628,11 @@ def build_targeted_quiz(
             "true_false": 5,
         },
     )
-    return QuizEngine().generate_quiz(
+    engine = _build_auxiliary_engine(strict_ai_generation)
+    return engine.generate_quiz(
         focused,
         targeted_config,
         allow_ai_generation=allow_ai_generation,
+        learning_style=learning_style,
     )
 

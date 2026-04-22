@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
 import re
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from collections import Counter
 from typing import Any, List, Optional
@@ -15,6 +16,20 @@ from langchain_openai import ChatOpenAI
 from quizmind.cache import JsonFileCache
 from quizmind.content import fallback_parse_content
 from quizmind.logger import log_event, timed_event
+from quizmind.prompt_center import (
+    ENGINEER_SCENE_INTERVIEW_PROMPT,
+    ENGINEER_SCENE_MODE_GUIDED_PROMPT,
+    ENGINEER_SCENE_MODE_STRICT_PROMPT,
+    GENERATE_INTERACTIVE_HTML_PROMPT,
+    SOURCE_CHUNK_SUMMARY_PROMPT,
+    SOURCE_MERGE_SUMMARY_PROMPT,
+    generate_from_source_system_prompt,
+    generate_quiz_guidance,
+    generate_quiz_system_prompt,
+    grade_batch_system_prompt,
+    parse_content_system_prompt,
+    quiz_quality_review_system_prompt,
+)
 from quizmind.models import (
     BatchSubjectiveGrade,
     Difficulty,
@@ -32,118 +47,9 @@ load_dotenv()
 TRUE_LABEL = "\u6b63\u786e"
 FALSE_LABEL = "\u9519\u8bef"
 
-PARSE_CONTENT_SYSTEM_PROMPT = (
-    "You are a learning-content parser. Return JSON only.\n"
-    "Required keys: title, source_type, cleaned_text, segments, knowledge_points, concepts.\n"
-    "Each knowledge_points item must include: name, summary, importance(1-5), "
-    "difficulty(easy|medium|hard), keywords.\n"
-    "Prefer Simplified Chinese for natural-language fields. If unstable, output English.\n"
-    "Do not output mojibake."
-)
-
-GENERATE_QUIZ_SYSTEM_PROMPT = (
-    "You are a professional quiz generator. Return JSON only.\n"
-    "Required keys: title, source_summary, questions.\n"
-    "Each question item must include: id, question_type(single_choice|multiple_choice|"
-    "fill_blank|short_answer|true_false), prompt, options(list), correct_answer(list), "
-    "explanation, knowledge_tags(list), difficulty(easy|medium|hard), reference_points(list).\n"
-    "Prefer Simplified Chinese for natural-language fields. If unstable, output English.\n"
-    "Do not output mojibake."
-    "Every question must be grounded in the provided source content.\n"
-    "Do not invent facts, terms, numbers, formulas, people, or events not present in source."
-)
-
-GENERATE_QUIZ_GUIDANCE = (
-    "Follow config type distribution as strictly as possible. Ensure usability of "
-    "fill_blank, true_false, short_answer.\n"
-    "fill_blank must be answerable; true_false must include options "
-    f"'{TRUE_LABEL}' and '{FALSE_LABEL}'; short_answer must provide complete reference answers."
-    "\nEach question must include reference_points copied from source wording whenever possible."
-)
-
-GENERATE_FROM_SOURCE_SYSTEM_PROMPT = (
-    "You are the core engine of an adaptive quiz system. In one response, complete both "
-    "content parsing and quiz generation.\n"
-    "Return JSON only with keys: parsed_content and quiz.\n"
-    "Prefer Simplified Chinese for natural-language fields. If unstable, output English.\n"
-    "Do not output mojibake."
-)
-
-GRADE_BATCH_SYSTEM_PROMPT = (
-    "You are a strict but supportive grader. Return JSON only.\n"
-    "Output schema: grades (list). Each grade item includes: question_id, score(0-100), "
-    "feedback, missing_points.\n"
-    "For objective questions (single_choice, multiple_choice, true_false, fill_blank), "
-    "use exact-match style grading and prefer 0 or 100.\n"
-    "For short_answer, score by semantic completeness against reference points.\n"
-    "Prefer Simplified Chinese for natural-language fields. If unstable, output English.\n"
-    "Do not output mojibake."
-)
-
-GENERATE_INTERACTIVE_HTML_PROMPT = (
-    "You are an assistant for generating interactive learning pages.\n"
-    "Return one complete embeddable HTML snippet (including style and script).\n"
-    "Requirements: Chinese copy preferred, clear structure, card layout, clickable topic switch, "
-    "mini quiz (1-3 single-choice questions) with instant feedback.\n"
-    "No external CDN dependency. Do not output markdown code fences.\n"
-    "If Chinese output becomes unstable, use English and never output mojibake."
-)
-
-SOURCE_CHUNK_SUMMARY_PROMPT = (
-    "You summarize a chunk of learning material.\n"
-    "Return plain text only.\n"
-    "Keep key facts, definitions, processes, formulas, examples, and constraints.\n"
-    "Prefer Simplified Chinese."
-)
-
-SOURCE_MERGE_SUMMARY_PROMPT = (
-    "You merge multiple chunk summaries into one concise learning source.\n"
-    "Return plain text only.\n"
-    "Keep coverage complete and remove repetition.\n"
-    "Preserve key terms and technical details.\n"
-    "Prefer Simplified Chinese."
-)
-
-ENGINEER_SCENE_INTERVIEW_PROMPT = (
-    "You are a senior principal engineer interviewer.\n"
-    "Run a scenario-based technical interrogation in Chinese, using:\n"
-    "1) First-principles reasoning\n"
-    "2) Socratic questioning\n"
-    "3) Engineering trade-off analysis\n"
-    "4) Production-oriented thinking (reliability, scalability, security, observability)\n"
-    "Ask exactly one sharp follow-up question per turn.\n"
-    "Do not output markdown. Do not output chain-of-thought.\n"
-    "Return JSON only with keys:\n"
-    "engineer_message(string), should_end(bool), is_passed(bool), score(0-100),\n"
-    "assessment(string), strengths(list[string]), weaknesses(list[string]), recommendations(list[string]).\n"
-    "Hard rule: if is_passed is false, should_end must be false.\n"
-    "Hard rule: you can end the interview only when is_passed is true.\n"
-    "When evidence is insufficient, should_end=false and is_passed=false.\n"
-    "Do not end the interview before the candidate demonstrates clear competence.\n"
-    "When candidate is clearly competent for this scenario, set should_end=true and is_passed=true.\n"
-    "If should_end=true and is_passed=true, engineer_message must explicitly include a clear pass acknowledgement.\n"
-    "Before pass, keep should_end=false and continue probing with one concrete follow-up question.\n"
-)
-
-ENGINEER_SCENE_MODE_GUIDED_PROMPT = (
-    "Mode: guided.\n"
-    "Style requirements:\n"
-    "1) Be supportive but still rigorous; keep pressure moderate.\n"
-    "2) After evaluating the candidate answer, briefly point out 1 key gap before asking the next question.\n"
-    "3) Provide tiny directional hints (not full solution), e.g., mention one dimension such as reliability/cost/latency.\n"
-    "4) Questions should progress from basic design to trade-off and production details.\n"
-    "5) Scoring should be fair and growth-oriented; do not fail because of minor expression issues.\n"
-)
-
-ENGINEER_SCENE_MODE_STRICT_PROMPT = (
-    "Mode: strict.\n"
-    "Style requirements:\n"
-    "1) Maintain high bar and high pressure; evaluate with principal-engineer standards.\n"
-    "2) Ask concise, sharp, adversarial follow-up questions; challenge assumptions directly.\n"
-    "3) Do not provide hints or scaffolding before pass; candidate must propose concrete mechanisms independently.\n"
-    "4) Focus on correctness, completeness, failure handling, observability, security, and rollback readiness.\n"
-    "5) Passing requires clear, structured, and production-ready answers across multiple rounds.\n"
-)
+PARSE_CONTENT_SYSTEM_PROMPT = parse_content_system_prompt()
+GENERATE_QUIZ_SYSTEM_PROMPT = generate_quiz_system_prompt()
+GENERATE_FROM_SOURCE_SYSTEM_PROMPT = generate_from_source_system_prompt()
 
 
 class LangChainQuizProvider:
@@ -151,15 +57,34 @@ class LangChainQuizProvider:
         api_key = os.getenv("SILICONFLOW_API_KEY") or os.getenv("OPENAI_API_KEY")
         base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
         self.model = os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3.2")
+        raw_fallback_models = os.getenv(
+            "QUIZMIND_FALLBACK_MODELS",
+            "Pro/zai-org/GLM-5.1,Qwen/Qwen3.5-397B-A17B",
+        )
+        self.fallback_models = [
+            item.strip()
+            for item in raw_fallback_models.split(",")
+            if item.strip() and item.strip() != self.model
+        ]
         self.fast_mode = self._safe_bool_env("QUIZMIND_FAST_MODE", False)
-        self.llm_timeout = max(10, self._safe_int_env("QUIZMIND_LLM_TIMEOUT", 45))
-        self.llm_max_retries = max(0, self._safe_int_env("QUIZMIND_LLM_MAX_RETRIES", 2))
-        default_attempts = 1 if self.fast_mode else 3
+        self.quality_first = self._safe_bool_env("QUIZMIND_QUALITY_FIRST", True)
+        self.ai_quality_review = self._safe_bool_env("QUIZMIND_AI_QUALITY_REVIEW", True)
+        self.ai_quality_threshold = max(
+            40, min(95, self._safe_int_env("QUIZMIND_AI_QUALITY_THRESHOLD", 70))
+        )
+        # Keep failures fast: long upstream timeouts are worse than quick fallback for this app.
+        self.llm_timeout = max(8, min(120, self._safe_int_env("QUIZMIND_LLM_TIMEOUT", 60)))
+        self.llm_max_retries = max(0, min(3, self._safe_int_env("QUIZMIND_LLM_MAX_RETRIES", 2)))
+        default_attempts = 1 if self.fast_mode else 2
         self.quiz_gen_attempts = max(
             1,
             min(6, self._safe_int_env("QUIZMIND_QUIZ_GEN_ATTEMPTS", default_attempts)),
         )
-        self.source_char_limit = self._safe_int_env("QUIZMIND_SOURCE_CHAR_LIMIT", 0)
+        self.source_char_limit = max(0, self._safe_int_env("QUIZMIND_SOURCE_CHAR_LIMIT", 2500))
+        self.source_use_summary = self._safe_bool_env("QUIZMIND_SOURCE_USE_SUMMARY", False)
+        self.source_context_max_chars = max(
+            1200, min(5000, self._safe_int_env("QUIZMIND_SOURCE_CONTEXT_MAX_CHARS", 2500))
+        )
         self.source_summary_chunk_size = max(
             1200, self._safe_int_env("QUIZMIND_SOURCE_SUMMARY_CHUNK_SIZE", 3200)
         )
@@ -170,7 +95,25 @@ class LangChainQuizProvider:
             1, min(8, self._safe_int_env("QUIZMIND_SOURCE_SUMMARY_CONCURRENCY", 2))
         )
         self.max_output_tokens = max(
-            0, self._safe_int_env("QUIZMIND_MAX_OUTPUT_TOKENS", 0)
+            512, min(4096, self._safe_int_env("QUIZMIND_MAX_OUTPUT_TOKENS", 2200))
+        )
+        self.generation_source_context_max_chars = max(
+            800,
+            min(
+                3000,
+                self._safe_int_env(
+                    "QUIZMIND_GENERATION_SOURCE_CONTEXT_MAX_CHARS", 1600
+                ),
+            ),
+        )
+        self.review_source_context_max_chars = max(
+            1200,
+            min(
+                6000,
+                self._safe_int_env(
+                    "QUIZMIND_REVIEW_SOURCE_CONTEXT_MAX_CHARS", 3200
+                ),
+            ),
         )
         self.quiz_points_limit = max(
             3,
@@ -190,7 +133,7 @@ class LangChainQuizProvider:
                 ),
             ),
         )
-        default_concurrency = 1 if self.fast_mode else 2
+        default_concurrency = 1
         self.quiz_gen_concurrency = max(
             1,
             min(
@@ -200,18 +143,83 @@ class LangChainQuizProvider:
                 ),
             ),
         )
+        self.parallel_model_generation = self._safe_bool_env(
+            "QUIZMIND_PARALLEL_MODEL_GENERATION", True
+        )
 
         self.cache = JsonFileCache()
         self.llm: Optional[ChatOpenAI] = None
-        if api_key:
-            self.llm = ChatOpenAI(
-                model=self.model,
-                api_key=api_key,
-                base_url=base_url,
-                temperature=0.4,
-                timeout=self.llm_timeout,
-                max_retries=self.llm_max_retries,
+        self.llm_clients: list[tuple[str, ChatOpenAI]] = []
+        self.last_used_model: str = self.model
+        self.last_model_chain: list[str] = [self.model]
+        self.model_cooldown_seconds = max(
+            30, self._safe_int_env("QUIZMIND_MODEL_COOLDOWN_SECONDS", 60)
+        )
+        self.model_cooldowns: dict[str, float] = {}
+        self.generation_model_priority = [
+            item.strip()
+            for item in (
+                self.fallback_models + [self.model]
             )
+            if item.strip()
+        ]
+        if api_key:
+            self.llm = self._build_llm_client(self.model, api_key, base_url)
+            self.llm_clients.append((self.model, self.llm))
+            for fallback_model in self.fallback_models:
+                self.llm_clients.append(
+                    (fallback_model, self._build_llm_client(fallback_model, api_key, base_url))
+                )
+
+    def _build_llm_client(
+        self,
+        model_name: str,
+        api_key: str,
+        base_url: str,
+    ) -> ChatOpenAI:
+        return ChatOpenAI(
+            model=model_name,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=0.4,
+            timeout=self.llm_timeout,
+            max_retries=self.llm_max_retries,
+        )
+
+    def _ordered_llm_clients(self) -> list[tuple[str, ChatOpenAI]]:
+        now = time.time()
+        return [
+            (name, client)
+            for name, client in self.llm_clients
+            if self.model_cooldowns.get(name, 0.0) <= now
+        ]
+
+    def _clients_for_operation(self, operation: str) -> list[tuple[str, ChatOpenAI]]:
+        clients = self._ordered_llm_clients()
+        if not clients and self.llm_clients:
+            rescue_model = self.model
+            if operation.startswith("generate_quiz") or operation == "review_quiz_quality":
+                rescue_model = self.model
+            for name, client in self.llm_clients:
+                if name == rescue_model:
+                    return [(name, client)]
+            return [self.llm_clients[0]]
+        if not clients:
+            return []
+        if operation.startswith("generate_quiz") or operation == "review_quiz_quality":
+            preferred_index = {
+                name: idx for idx, name in enumerate(self.generation_model_priority)
+            }
+            clients.sort(key=lambda item: preferred_index.get(item[0], len(preferred_index)))
+        return clients
+
+    def _mark_model_timeout(self, model_name: str) -> None:
+        self.model_cooldowns[model_name] = time.time() + self.model_cooldown_seconds
+        log_event(
+            "llm.model_cooldown",
+            model=model_name,
+            cooldown_seconds=self.model_cooldown_seconds,
+        )
 
     def parse_content(self, source: str, source_type: str) -> ParsedContent:
         if not self.llm:
@@ -241,7 +249,10 @@ class LangChainQuizProvider:
             return fallback_parse_content(source, source_type)
 
     def generate_quiz(
-        self, parsed: ParsedContent, config: QuizConfig
+        self,
+        parsed: ParsedContent,
+        config: QuizConfig,
+        learning_style: str = "teacher",
     ) -> Optional[Quiz]:
         if not self.llm:
             return None
@@ -250,14 +261,28 @@ class LangChainQuizProvider:
             "title": parsed.title,
             "knowledge_points": [
                 point.model_dump()
-                for point in parsed.knowledge_points[: self.quiz_points_limit]
+                for point in parsed.knowledge_points[
+                    : min(self.quiz_points_limit, max(4, config.question_count))
+                ]
             ],
-            "segments": parsed.segments[: self.quiz_segments_limit],
-            "source_context": self._build_source_context(parsed.cleaned_text),
+            "segments": parsed.segments[
+                : min(self.quiz_segments_limit, max(4, config.question_count // 2 + 2))
+            ],
+            "source_context": self._build_source_context(
+                parsed.cleaned_text,
+                max_chars=self.generation_source_context_max_chars,
+            ),
             "config": config.model_dump(),
         }
 
-        temperatures = [0.45] if self.fast_mode else [0.45, 0.6, 0.35, 0.7, 0.5, 0.3]
+        if self.fast_mode:
+            temperatures = [0.38, 0.45] if self.quality_first else [0.45]
+        else:
+            temperatures = (
+                [0.35, 0.45, 0.3, 0.5, 0.4, 0.55]
+                if self.quality_first
+                else [0.45, 0.6, 0.35, 0.7, 0.5, 0.3]
+            )
         best_quiz: Optional[Quiz] = None
         best_score = -1
         if self.quiz_gen_attempts <= 1 or self.quiz_gen_concurrency <= 1:
@@ -268,6 +293,7 @@ class LangChainQuizProvider:
                     payload=payload,
                     attempt=attempt,
                     temperatures=temperatures,
+                    learning_style=learning_style,
                 )
                 if not candidate:
                     continue
@@ -296,6 +322,7 @@ class LangChainQuizProvider:
                         payload,
                         attempt,
                         temperatures,
+                        learning_style,
                     )
                 )
 
@@ -326,6 +353,7 @@ class LangChainQuizProvider:
         payload: dict,
         attempt: int,
         temperatures: list[float],
+        learning_style: str = "teacher",
     ) -> tuple[Quiz, int] | None:
         response = self._invoke_json(
             operation=f"generate_quiz_try_{attempt + 1}",
@@ -333,7 +361,7 @@ class LangChainQuizProvider:
             system_prompt=GENERATE_QUIZ_SYSTEM_PROMPT,
             human_prompt=(
                 "Generate a quiz from the parsed result below.\n"
-                f"Additional requirements:\n{GENERATE_QUIZ_GUIDANCE}\n"
+                f"Additional requirements:\n{generate_quiz_guidance(TRUE_LABEL, FALSE_LABEL, learning_style)}\n"
                 "{payload}"
             ),
             payload=payload,
@@ -354,6 +382,7 @@ class LangChainQuizProvider:
         source: str,
         source_type: str,
         config: QuizConfig,
+        learning_style: str = "teacher",
     ) -> tuple[ParsedContent, Optional[Quiz]]:
         if not self.llm:
             parsed = fallback_parse_content(source, source_type)
@@ -369,7 +398,11 @@ class LangChainQuizProvider:
             operation="generate_quiz_from_source",
             temperature=0.5,
             system_prompt=GENERATE_FROM_SOURCE_SYSTEM_PROMPT,
-            human_prompt="Process the raw content below and output parsed_content + quiz:\n{payload}",
+            human_prompt=(
+                "Process the raw content below and output parsed_content + quiz.\n"
+                f"Additional requirements:\n{generate_quiz_guidance(TRUE_LABEL, FALSE_LABEL, learning_style)}\n"
+                "{payload}"
+            ),
             payload=payload,
             use_cache=False,
         )
@@ -390,23 +423,24 @@ class LangChainQuizProvider:
             quiz_obj = Quiz.model_validate(quiz_data)
 
             if not self._quiz_is_grounded(quiz_obj, parsed_obj.cleaned_text):
-                improved = self.generate_quiz(parsed_obj, config)
+                improved = self.generate_quiz(parsed_obj, config, learning_style)
                 return parsed_obj, improved
             if self.fast_mode:
                 return parsed_obj, quiz_obj
             if self._quiz_quality_good(quiz_obj, config):
                 return parsed_obj, quiz_obj
 
-            improved = self.generate_quiz(parsed_obj, config)
+            improved = self.generate_quiz(parsed_obj, config, learning_style)
             return parsed_obj, (improved or quiz_obj)
         except Exception as exc:
             log_event("generate_quiz_from_source.fallback", reason=str(exc))
             parsed = fallback_parse_content(source, source_type)
-            return parsed, self.generate_quiz(parsed, config)
+            return parsed, self.generate_quiz(parsed, config, learning_style)
 
     def grade_subjective_batch(
         self,
         questions_and_answers: list[tuple[Question, List[str]]],
+        learning_style: str = "teacher",
     ) -> dict[str, BatchSubjectiveGrade]:
         if not self.llm or not questions_and_answers:
             return {}
@@ -429,7 +463,7 @@ class LangChainQuizProvider:
         response = self._invoke_json(
             operation="grade_subjective_batch",
             temperature=0.1,
-            system_prompt=GRADE_BATCH_SYSTEM_PROMPT,
+            system_prompt=grade_batch_system_prompt(learning_style),
             human_prompt="Grade the following answers in batch (objective and subjective):\n{payload}",
             payload=payload,
             use_cache=False,
@@ -438,20 +472,105 @@ class LangChainQuizProvider:
             return {}
 
         grades = response.get("grades", [])
+        if not isinstance(grades, list):
+            grades = []
         result: dict[str, BatchSubjectiveGrade] = {}
         for item in grades:
+            if not isinstance(item, dict):
+                continue
+            try:
+                score_value = float(item.get("score", 0))
+            except (TypeError, ValueError):
+                score_value = 0.0
+            raw_breakdown = item.get("score_breakdown", {})
+            breakdown: dict[str, float] = {}
+            if isinstance(raw_breakdown, dict):
+                for key in ("correctness", "completeness", "clarity"):
+                    try:
+                        breakdown[key] = float(raw_breakdown.get(key, 0))
+                    except (TypeError, ValueError):
+                        breakdown[key] = 0.0
             grade = BatchSubjectiveGrade.model_validate(
                 {
                     "question_id": str(item.get("question_id", "")),
-                    "score": float(item.get("score", 0)),
+                    "score": score_value,
                     "feedback": str(item.get("feedback", "")),
                     "missing_points": [
                         str(point) for point in item.get("missing_points", [])
                     ],
+                    "error_category": str(item.get("error_category", "")),
+                    "score_breakdown": breakdown,
+                    "structured_explanation": str(
+                        item.get("structured_explanation", "")
+                    ),
                 }
             )
             result[grade.question_id] = grade
         return result
+
+    def review_quiz_quality(
+        self,
+        quiz: Quiz,
+        source_text: str,
+        config: QuizConfig,
+    ) -> dict[str, Any]:
+        if not self.llm:
+            return {"pass": True, "overall_score": 100.0, "issues": [], "summary": "LLM unavailable"}
+
+        payload = {
+            "config": config.model_dump(),
+            "source_context": self._build_source_context(
+                source_text,
+                max_chars=self.review_source_context_max_chars,
+            ),
+            "quiz": quiz.model_dump(),
+        }
+        response = self._invoke_json(
+            operation="review_quiz_quality",
+            temperature=0.05,
+            system_prompt=quiz_quality_review_system_prompt(),
+            human_prompt=(
+                "Audit the quiz quality against source and config.\n"
+                "Return strict quality review JSON only.\n"
+                "{payload}"
+            ),
+            payload=payload,
+            use_cache=False,
+        )
+        if not isinstance(response, dict):
+            return {"pass": True, "overall_score": 100.0, "issues": [], "summary": "review skipped"}
+
+        issues = response.get("issues", [])
+        if not isinstance(issues, list):
+            issues = []
+        normalized_issues = []
+        for item in issues:
+            if not isinstance(item, dict):
+                continue
+            normalized_issues.append(
+                {
+                    "question_id": str(item.get("question_id", "")),
+                    "severity": str(item.get("severity", "low")).lower(),
+                    "category": str(item.get("category", "")),
+                    "message": str(item.get("message", "")).strip(),
+                }
+            )
+        try:
+            overall_score = float(response.get("overall_score", 0))
+        except (TypeError, ValueError):
+            overall_score = 0.0
+
+        has_high_issue = any(x.get("severity") == "high" for x in normalized_issues)
+        passed = bool(response.get("pass", False))
+        if overall_score < self.ai_quality_threshold or has_high_issue:
+            passed = False
+
+        return {
+            "pass": passed,
+            "overall_score": overall_score,
+            "issues": normalized_issues,
+            "summary": str(response.get("summary", "")),
+        }
 
     def generate_interactive_html(self, parsed: ParsedContent) -> Optional[str]:
         if not self.llm:
@@ -582,12 +701,19 @@ class LangChainQuizProvider:
         payload: dict,
         use_cache: bool = True,
     ) -> dict | None:
-        if not self.llm:
+        clients = self._clients_for_operation(operation)
+        if not clients:
             return None
+        self.last_used_model = clients[0][0]
+        self.last_model_chain = [name for name, _ in clients]
 
         cache_key = self.cache.build_key(
             operation,
-            {"model": self.model, "temperature": temperature, "payload": payload},
+            {
+                "models": [name for name, _ in clients],
+                "temperature": temperature,
+                "payload": payload,
+            },
         )
         if use_cache:
             cached = self.cache.get(cache_key)
@@ -607,59 +733,108 @@ class LangChainQuizProvider:
             "format_instructions": parser.get_format_instructions(),
         }
 
-        # Primary path: full LangChain structured output chain.
-        try:
-            data = self._invoke_json_chain(
+        fallback_prompt = self._build_prompt(
+            system_prompt=system_prompt,
+            human_prompt="{format_instructions}\n\n" + human_prompt,
+            include_format_instructions=False,
+        )
+        fast_fail_on_timeout = operation == "parse_content"
+        parallel_models = (
+            self.parallel_model_generation
+            and len(clients) > 1
+            and (
+                operation.startswith("generate_quiz")
+                or operation == "review_quiz_quality"
+            )
+        )
+        if parallel_models:
+            return self._invoke_json_parallel(
                 operation=operation,
                 temperature=temperature,
                 prompt=prompt,
+                fallback_prompt=fallback_prompt,
                 parser=parser,
                 message_vars=message_vars,
+                clients=clients,
+                cache_key=cache_key,
+                use_cache=use_cache,
             )
-            if data is not None:
+        last_error: Exception | None = None
+        for index, (model_name, llm_client) in enumerate(clients):
+            if index > 0:
+                self.last_model_chain = [name for name, _ in clients[: index + 1]]
+                log_event(
+                    "llm.model_fallback",
+                    operation=operation,
+                    from_model=clients[index - 1][0],
+                    to_model=model_name,
+                )
+            try:
+                data = self._invoke_json_chain(
+                    operation=operation,
+                    temperature=temperature,
+                    prompt=prompt,
+                    parser=parser,
+                    message_vars=message_vars,
+                    llm_client=llm_client,
+                    model_name=model_name,
+                )
+                if data is not None:
+                    self.last_used_model = model_name
+                    if use_cache:
+                        self.cache.set(cache_key, data)
+                    log_event("llm.invoke.success", operation=operation, model=model_name)
+                    return data
+            except Exception as exc:
+                last_error = exc
+                log_event(
+                    "llm.invoke_json_chain_failed",
+                    operation=operation,
+                    model=model_name,
+                    error_type=exc.__class__.__name__,
+                    error=str(exc),
+                )
+                if self._is_timeout_like(exc):
+                    self._mark_model_timeout(model_name)
+                    if fast_fail_on_timeout:
+                        break
+                    continue
+
+            try:
+                fallback_text = self._invoke_text_chain(
+                    operation=operation,
+                    temperature=temperature,
+                    prompt=fallback_prompt,
+                    message_vars=message_vars,
+                    llm_client=llm_client,
+                    model_name=model_name,
+                )
+                if not fallback_text:
+                    continue
+                data = self._parse_json(fallback_text)
+                self.last_used_model = model_name
                 if use_cache:
                     self.cache.set(cache_key, data)
-                log_event("llm.invoke.success", operation=operation, model=self.model)
+                log_event("llm.invoke.success", operation=operation, model=model_name)
                 return data
-        except Exception as exc:
+            except Exception as exc:
+                last_error = exc
+                log_event(
+                    "llm.invoke_failed",
+                    operation=operation,
+                    model=model_name,
+                    error_type=exc.__class__.__name__,
+                    error=str(exc),
+                )
+        if last_error:
             log_event(
-                "llm.invoke_json_chain_failed",
+                "llm.all_models_failed",
                 operation=operation,
-                model=self.model,
-                error_type=exc.__class__.__name__,
-                error=str(exc),
+                model_chain=" -> ".join(name for name, _ in clients),
+                error_type=last_error.__class__.__name__,
+                error=str(last_error),
             )
-
-        # Fallback path: text chain + local JSON recovery.
-        try:
-            fallback_prompt = self._build_prompt(
-                system_prompt=system_prompt,
-                human_prompt="{format_instructions}\n\n" + human_prompt,
-                include_format_instructions=False,
-            )
-            fallback_text = self._invoke_text_chain(
-                operation=operation,
-                temperature=temperature,
-                prompt=fallback_prompt,
-                message_vars=message_vars,
-            )
-            if not fallback_text:
-                return None
-            data = self._parse_json(fallback_text)
-        except Exception as exc:
-            log_event(
-                "llm.invoke_failed",
-                operation=operation,
-                model=self.model,
-                error_type=exc.__class__.__name__,
-                error=str(exc),
-            )
-            return None
-
-        if use_cache:
-            self.cache.set(cache_key, data)
-        log_event("llm.invoke.success", operation=operation, model=self.model)
-        return data
+        return None
 
     def _invoke_text(
         self,
@@ -669,12 +844,19 @@ class LangChainQuizProvider:
         human_prompt: str,
         payload: dict,
     ) -> Optional[str]:
-        if not self.llm:
+        clients = self._clients_for_operation(operation)
+        if not clients:
             return None
+        self.last_used_model = clients[0][0]
+        self.last_model_chain = [name for name, _ in clients]
 
         cache_key = self.cache.build_key(
             operation,
-            {"model": self.model, "temperature": temperature, "payload": payload},
+            {
+                "models": [name for name, _ in clients],
+                "temperature": temperature,
+                "payload": payload,
+            },
         )
         cached = self.cache.get(cache_key)
         if isinstance(cached, dict) and isinstance(cached.get("text"), str):
@@ -682,38 +864,180 @@ class LangChainQuizProvider:
             return str(cached["text"])
 
         log_event("llm.cache_miss", operation=operation, key=cache_key)
-        try:
-            prompt = self._build_prompt(
-                system_prompt=system_prompt,
-                human_prompt=human_prompt,
-                include_format_instructions=False,
+        prompt = self._build_prompt(
+            system_prompt=system_prompt,
+            human_prompt=human_prompt,
+            include_format_instructions=False,
+        )
+        last_error: Exception | None = None
+        for index, (model_name, llm_client) in enumerate(clients):
+            if index > 0:
+                self.last_model_chain = [name for name, _ in clients[: index + 1]]
+                log_event(
+                    "llm.model_fallback",
+                    operation=operation,
+                    from_model=clients[index - 1][0],
+                    to_model=model_name,
+                )
+            try:
+                text = self._invoke_text_chain(
+                    operation=operation,
+                    temperature=temperature,
+                    prompt=prompt,
+                    message_vars={"payload": json.dumps(payload, ensure_ascii=False)},
+                    llm_client=llm_client,
+                    model_name=model_name,
+                )
+                if text is None:
+                    continue
+                text = text.strip()
+
+                if text.startswith("```"):
+                    text = re.sub(r"^```(?:html)?\s*", "", text)
+                    text = re.sub(r"\s*```$", "", text)
+
+                self.last_used_model = model_name
+                self.cache.set(cache_key, {"text": text})
+                log_event("llm.invoke.success", operation=operation, model=model_name)
+                return text
+            except Exception as exc:
+                last_error = exc
+                if self._is_timeout_like(exc):
+                    self._mark_model_timeout(model_name)
+                log_event(
+                    "llm.invoke_failed",
+                    operation=operation,
+                    model=model_name,
+                    error_type=exc.__class__.__name__,
+                    error=str(exc),
+                )
+        if last_error:
+            log_event(
+                "llm.all_models_failed",
+                operation=operation,
+                model_chain=" -> ".join(name for name, _ in clients),
+                error_type=last_error.__class__.__name__,
+                error=str(last_error),
             )
-            text = self._invoke_text_chain(
+        return None
+
+    def _invoke_json_parallel(
+        self,
+        operation: str,
+        temperature: float,
+        prompt: ChatPromptTemplate,
+        fallback_prompt: ChatPromptTemplate,
+        parser: JsonOutputParser,
+        message_vars: dict[str, Any],
+        clients: list[tuple[str, ChatOpenAI]],
+        cache_key: str,
+        use_cache: bool,
+    ) -> dict | None:
+        log_event(
+            "llm.parallel_models_start",
+            operation=operation,
+            model_chain=" -> ".join(name for name, _ in clients),
+        )
+        last_error: Exception | None = None
+        pool = ThreadPoolExecutor(
+            max_workers=len(clients), thread_name_prefix="llm-parallel"
+        )
+        try:
+            future_map = {
+                pool.submit(
+                    self._invoke_json_model_worker,
+                    operation,
+                    temperature,
+                    prompt,
+                    fallback_prompt,
+                    parser,
+                    message_vars,
+                    llm_client,
+                    model_name,
+                ): model_name
+                for model_name, llm_client in clients
+            }
+            for future in as_completed(future_map):
+                model_name = future_map[future]
+                try:
+                    data = future.result()
+                except Exception as exc:
+                    last_error = exc
+                    if self._is_timeout_like(exc):
+                        self._mark_model_timeout(model_name)
+                    log_event(
+                        "llm.parallel_model_failed",
+                        operation=operation,
+                        model=model_name,
+                        error_type=exc.__class__.__name__,
+                        error=str(exc),
+                    )
+                    continue
+                if not data:
+                    continue
+                self.last_used_model = model_name
+                self.last_model_chain = [name for name, _ in clients]
+                if use_cache:
+                    self.cache.set(cache_key, data)
+                log_event("llm.invoke.success", operation=operation, model=model_name)
+                for pending in future_map:
+                    if not pending.done():
+                        pending.cancel()
+                return data
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        if last_error:
+            log_event(
+                "llm.all_models_failed",
+                operation=operation,
+                model_chain=" -> ".join(name for name, _ in clients),
+                error_type=last_error.__class__.__name__,
+                error=str(last_error),
+            )
+        return None
+
+    def _invoke_json_model_worker(
+        self,
+        operation: str,
+        temperature: float,
+        prompt: ChatPromptTemplate,
+        fallback_prompt: ChatPromptTemplate,
+        parser: JsonOutputParser,
+        message_vars: dict[str, Any],
+        llm_client: ChatOpenAI,
+        model_name: str,
+    ) -> dict | None:
+        try:
+            return self._invoke_json_chain(
                 operation=operation,
                 temperature=temperature,
                 prompt=prompt,
-                message_vars={"payload": json.dumps(payload, ensure_ascii=False)},
+                parser=parser,
+                message_vars=message_vars,
+                llm_client=llm_client,
+                model_name=model_name,
             )
-            if text is None:
-                return None
-            text = text.strip()
-
-            if text.startswith("```"):
-                text = re.sub(r"^```(?:html)?\s*", "", text)
-                text = re.sub(r"\s*```$", "", text)
-
-            self.cache.set(cache_key, {"text": text})
-            log_event("llm.invoke.success", operation=operation, model=self.model)
-            return text
         except Exception as exc:
             log_event(
-                "llm.invoke_failed",
+                "llm.invoke_json_chain_failed",
                 operation=operation,
-                model=self.model,
+                model=model_name,
                 error_type=exc.__class__.__name__,
                 error=str(exc),
             )
+            if self._is_timeout_like(exc):
+                raise
+        fallback_text = self._invoke_text_chain(
+            operation=operation,
+            temperature=temperature,
+            prompt=fallback_prompt,
+            message_vars=message_vars,
+            llm_client=llm_client,
+            model_name=model_name,
+        )
+        if not fallback_text:
             return None
+        return self._parse_json(fallback_text)
 
     def _build_prompt(
         self,
@@ -721,13 +1045,27 @@ class LangChainQuizProvider:
         human_prompt: str,
         include_format_instructions: bool,
     ) -> ChatPromptTemplate:
+        safe_system_prompt = self._escape_prompt_template(system_prompt)
+        safe_human_prompt = self._escape_prompt_template(human_prompt)
         if include_format_instructions:
-            human = "{format_instructions}\n\n" + human_prompt
+            human = "{format_instructions}\n\n" + safe_human_prompt
         else:
-            human = human_prompt
+            human = safe_human_prompt
         return ChatPromptTemplate.from_messages(
-            [("system", system_prompt), ("human", human)]
+            [("system", safe_system_prompt), ("human", human)]
         )
+
+    @staticmethod
+    def _escape_prompt_template(
+        text: str,
+        allowed_vars: tuple[str, ...] = ("payload", "format_instructions"),
+    ) -> str:
+        # Escape all braces so JSON examples in prompts are treated as plain text.
+        escaped = text.replace("{", "{{").replace("}", "}}")
+        # Re-enable only the placeholders we intentionally pass to ChatPromptTemplate.
+        for var in allowed_vars:
+            escaped = escaped.replace(f"{{{{{var}}}}}", f"{{{var}}}")
+        return escaped
 
     def _invoke_json_chain(
         self,
@@ -736,15 +1074,15 @@ class LangChainQuizProvider:
         prompt: ChatPromptTemplate,
         parser: JsonOutputParser,
         message_vars: dict[str, Any],
+        llm_client: ChatOpenAI,
+        model_name: str,
     ) -> dict | None:
-        if not self.llm:
-            return None
         chain = (
             prompt
-            | self.llm.bind(**self._llm_bind_kwargs(temperature))
+            | llm_client.bind(**self._llm_bind_kwargs(temperature))
             | parser
         )
-        with timed_event("llm.invoke", operation=operation, model=self.model):
+        with timed_event("llm.invoke", operation=operation, model=model_name):
             parsed = chain.invoke(message_vars)
         if isinstance(parsed, dict):
             return parsed
@@ -758,15 +1096,15 @@ class LangChainQuizProvider:
         temperature: float,
         prompt: ChatPromptTemplate,
         message_vars: dict[str, Any],
+        llm_client: ChatOpenAI,
+        model_name: str,
     ) -> str | None:
-        if not self.llm:
-            return None
         chain = (
             prompt
-            | self.llm.bind(**self._llm_bind_kwargs(temperature))
+            | llm_client.bind(**self._llm_bind_kwargs(temperature))
             | StrOutputParser()
         )
-        with timed_event("llm.invoke", operation=operation, model=self.model):
+        with timed_event("llm.invoke", operation=operation, model=model_name):
             return str(chain.invoke(message_vars))
 
     def _parse_json(self, text: str) -> dict:
@@ -933,6 +1271,12 @@ class LangChainQuizProvider:
             return default
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _is_timeout_like(exc: Exception) -> bool:
+        name = exc.__class__.__name__.lower()
+        text = str(exc).lower()
+        return "timeout" in name or "timed out" in text or "timeout" in text
+
     def _llm_bind_kwargs(self, temperature: float) -> dict:
         kwargs: dict[str, Any] = {"temperature": temperature}
         if self.max_output_tokens > 0:
@@ -944,10 +1288,10 @@ class LangChainQuizProvider:
         if self.source_char_limit <= 0 or len(cleaned) <= self.source_char_limit:
             return cleaned
 
-        # For long input, prefer AI summarization over hard truncation.
-        summarized = self._summarize_source_content(cleaned)
-        if summarized:
-            return summarized
+        if self.source_use_summary:
+            summarized = self._summarize_source_content(cleaned)
+            if summarized:
+                return summarized
 
         head_len = int(self.source_char_limit * 0.65)
         tail_len = self.source_char_limit - head_len
@@ -959,7 +1303,7 @@ class LangChainQuizProvider:
         )
 
     def _summarize_source_content(self, source: str) -> str | None:
-        if not self.llm or self.source_char_limit <= 0:
+        if not self.llm_clients or self.source_char_limit <= 0:
             return None
 
         chunks = self._split_for_summary(
@@ -1061,7 +1405,9 @@ class LangChainQuizProvider:
             return text
         return text[:limit]
 
-    def _build_source_context(self, source: str, max_chars: int = 5000) -> str:
+    def _build_source_context(self, source: str, max_chars: int | None = None) -> str:
+        if max_chars is None:
+            max_chars = self.source_context_max_chars
         text = (source or "").strip()
         if not text:
             return ""
@@ -1325,6 +1671,7 @@ class LangChainQuizProvider:
         dedup = len(set(prompt_keys))
         duplicates = max(0, len(prompt_keys) - dedup)
         score -= duplicates * 10
+        score += self._quiz_content_quality_score(quiz)
         return score
 
     def _quiz_quality_good(self, quiz: Quiz, config: QuizConfig) -> bool:
@@ -1365,5 +1712,66 @@ class LangChainQuizProvider:
             ):
                 return False
 
+        # Keep a minimum semantic bar to avoid fast but low-quality quizzes.
+        min_quality_score = max(30, len(quiz.questions) * 4)
+        if self._quiz_content_quality_score(quiz) < min_quality_score:
+            return False
+
         return True
+
+    def _quiz_content_quality_score(self, quiz: Quiz) -> int:
+        score = 0
+        for q in quiz.questions:
+            prompt = (q.prompt or "").strip()
+            explanation = (q.explanation or "").strip()
+            refs = [str(item).strip() for item in (q.reference_points or []) if str(item).strip()]
+
+            score += 2 if len(prompt) >= 16 else -3
+            score += 2 if len(explanation) >= 20 else -2
+            score += 1 if refs else -1
+
+            if q.question_type.value in {
+                QuestionType.single_choice.value,
+                QuestionType.multiple_choice.value,
+            }:
+                options = [str(item).strip() for item in (q.options or []) if str(item).strip()]
+                unique_options = set(options)
+                if len(options) >= 4:
+                    score += 2
+                else:
+                    score -= 3
+                if len(unique_options) == len(options):
+                    score += 1
+                else:
+                    score -= 2
+
+                generic_like = sum(
+                    1
+                    for item in options
+                    if re.search(r"^(选项|option)\s*[A-D]?$", item.strip(), flags=re.IGNORECASE)
+                )
+                if generic_like >= max(1, len(options) // 2):
+                    score -= 4
+
+                has_answer_in_options = any(
+                    ans.strip() in unique_options for ans in (q.correct_answer or [])
+                )
+                if not has_answer_in_options:
+                    score -= 4
+
+            if q.question_type.value == QuestionType.short_answer.value:
+                answer_len = len(" ".join(q.correct_answer or []).strip())
+                if answer_len < 18:
+                    score -= 3
+                else:
+                    score += 2
+
+        # Penalize near-duplicate prompt bodies.
+        keys = [
+            re.sub(r"[^\w\u4e00-\u9fff]", "", (q.prompt or "").lower())
+            for q in quiz.questions
+        ]
+        duplicates = max(0, len(keys) - len(set(keys)))
+        score -= duplicates * 8
+        return score
 

@@ -150,6 +150,9 @@ class QuestionResult(BaseModel):
     correct_answer: List[str]
     feedback: str
     missing_points: List[str] = Field(default_factory=list)
+    error_category: str = ""
+    score_breakdown: Dict[str, float] = Field(default_factory=dict)
+    structured_explanation: str = ""
 
 
 class KnowledgeStat(BaseModel):
@@ -226,6 +229,9 @@ class BatchSubjectiveGrade(BaseModel):
     score: float = Field(ge=0, le=100)
     feedback: str
     missing_points: List[str] = Field(default_factory=list)
+    error_category: str = ""
+    score_breakdown: Dict[str, float] = Field(default_factory=dict)
+    structured_explanation: str = ""
 
 
 class SceneTurnResult(BaseModel):

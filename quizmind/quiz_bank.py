@@ -19,13 +19,20 @@ class QuizBank:
         self.export_dir.mkdir(parents=True, exist_ok=True)
         self.index_file = self.root / "index.json"
 
-    def build_signature(self, source: str, source_type: str, config: QuizConfig) -> str:
+    def build_signature(
+        self,
+        source: str,
+        source_type: str,
+        config: QuizConfig,
+        learning_style: str = "teacher",
+    ) -> str:
         signature_version = os.getenv("QUIZMIND_SIGNATURE_VERSION", "2")
         payload = {
             "signature_version": signature_version,
             "source_type": source_type,
             "source": source.strip(),
             "config": config.model_dump(),
+            "learning_style": str(learning_style or "teacher").strip().lower(),
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -33,10 +40,9 @@ class QuizBank:
     def find_by_signature(self, signature: str) -> Optional[Tuple[ParsedContent, Quiz, Dict[str, Any]]]:
         for item in reversed(self._load_index()):
             if item.get("signature") == signature:
-                loaded = self._load_record(item)
+                loaded = self._load_record_with_item(item)
                 if loaded:
-                    parsed, quiz = loaded
-                    return parsed, quiz, item
+                    return loaded
         return None
 
     def save(
@@ -121,10 +127,9 @@ class QuizBank:
     def get_by_id(self, record_id: str) -> Optional[Tuple[ParsedContent, Quiz, Dict[str, Any]]]:
         for item in self._load_index():
             if item.get("id") == record_id:
-                loaded = self._load_record(item)
+                loaded = self._load_record_with_item(item)
                 if loaded:
-                    parsed, quiz = loaded
-                    return parsed, quiz, item
+                    return loaded
                 return None
         return None
 
@@ -157,6 +162,16 @@ class QuizBank:
         parsed = ParsedContent.model_validate(data["parsed"])
         quiz = Quiz.model_validate(data["quiz"])
         return parsed, quiz
+
+    def _load_record_with_item(
+        self,
+        item: Dict[str, Any],
+    ) -> Optional[Tuple[ParsedContent, Quiz, Dict[str, Any]]]:
+        loaded = self._load_record(item)
+        if not loaded:
+            return None
+        parsed, quiz = loaded
+        return parsed, quiz, item
 
     def _load_index(self) -> List[Dict[str, Any]]:
         if not self.index_file.exists():
