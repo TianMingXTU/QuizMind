@@ -268,6 +268,7 @@ def render_section_head(title: str, subtitle: str = "") -> None:
 
 
 IMPORT_ARCHIVE_DIR = Path(".quizmind_runtime/import_papers")
+IMPORT_ANSWER_SNAPSHOT_DIR = Path(".quizmind_runtime/import_answers")
 
 IMPORT_EXAM_TEMPLATE = {
     "title": "导入试卷示例",
@@ -337,9 +338,14 @@ IMPORT_QUESTION_TYPE_MAP = {
     "multiple_choice": (QuestionType.multiple_choice.value, "多选题"),
     "multiple": (QuestionType.multiple_choice.value, "多选题"),
     "multi_select": (QuestionType.multiple_choice.value, "多选题"),
+    "multi_choice": (QuestionType.multiple_choice.value, "多选题"),
+    "multiple_select": (QuestionType.multiple_choice.value, "多选题"),
     "checkbox": (QuestionType.multiple_choice.value, "多选题"),
     "多选": (QuestionType.multiple_choice.value, "多选题"),
     "多选题": (QuestionType.multiple_choice.value, "多选题"),
+    "多项选择": (QuestionType.multiple_choice.value, "多选题"),
+    "多项选择题": (QuestionType.multiple_choice.value, "多选题"),
+    "不定项选择题": (QuestionType.multiple_choice.value, "多选题"),
     "不定项选择": (QuestionType.multiple_choice.value, "多选题"),
     "true_false": (QuestionType.true_false.value, "判断题"),
     "boolean": (QuestionType.true_false.value, "判断题"),
@@ -347,9 +353,12 @@ IMPORT_QUESTION_TYPE_MAP = {
     "判断": (QuestionType.true_false.value, "判断题"),
     "fill_blank": (QuestionType.fill_blank.value, "填空题"),
     "blank": (QuestionType.fill_blank.value, "填空题"),
+    "cloze_test": (QuestionType.fill_blank.value, "完形填空"),
     "填空": (QuestionType.fill_blank.value, "填空题"),
     "填空题": (QuestionType.fill_blank.value, "填空题"),
     "完形填空题": (QuestionType.fill_blank.value, "完形填空"),
+    "多空填空": (QuestionType.fill_blank.value, "填空题"),
+    "完形填空": (QuestionType.fill_blank.value, "完形填空"),
     "short_answer": (QuestionType.short_answer.value, "简答题"),
     "qa": (QuestionType.short_answer.value, "问答题"),
     "question_answer": (QuestionType.short_answer.value, "问答题"),
@@ -374,6 +383,8 @@ def clear_import_answer_state() -> None:
     for key in list(st.session_state.keys()):
         if key.startswith("import_answer_"):
             del st.session_state[key]
+    st.session_state.import_answers_store = {}
+    st.session_state.import_answers_store_digest = ""
 
 
 def _sanitize_name(name: str, default_suffix: str = ".json") -> str:
@@ -393,6 +404,92 @@ def _persist_import_source(raw_text: str, source_name: str, source_kind: str) ->
     save_path = IMPORT_ARCHIVE_DIR / f"{stamp}_{source_kind}_{content_hash}_{safe_name}"
     save_path.write_text(raw_text, encoding="utf-8")
     return str(save_path)
+
+
+def _import_answer_snapshot_path(exam_hash: str) -> Path:
+    IMPORT_ANSWER_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    safe_hash = re.sub(r"[^a-fA-F0-9]", "", str(exam_hash or "").strip())[:64]
+    if not safe_hash:
+        safe_hash = "unknown"
+    return IMPORT_ANSWER_SNAPSHOT_DIR / f"{safe_hash}.json"
+
+
+def _persist_import_answers_snapshot(exam_hash: str) -> None:
+    clean_hash = str(exam_hash or "").strip()
+    if not clean_hash:
+        return
+    store = st.session_state.get("import_answers_store", {})
+    if not isinstance(store, dict):
+        return
+    store_text = json.dumps(store, ensure_ascii=False, sort_keys=True)
+    store_digest = hashlib.sha256(store_text.encode("utf-8")).hexdigest()
+    if st.session_state.get("import_answers_store_digest") == store_digest:
+        return
+    payload = {
+        "exam_hash": clean_hash,
+        "updated_at": datetime.now().isoformat(),
+        "answers_store": store,
+    }
+    _import_answer_snapshot_path(clean_hash).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    st.session_state.import_answers_store_digest = store_digest
+
+
+def _load_import_answers_snapshot(exam_hash: str) -> dict[str, object]:
+    clean_hash = str(exam_hash or "").strip()
+    if not clean_hash:
+        return {}
+    file_path = _import_answer_snapshot_path(clean_hash)
+    if not file_path.exists():
+        return {}
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    answers_store = payload.get("answers_store")
+    if isinstance(answers_store, dict):
+        store_text = json.dumps(answers_store, ensure_ascii=False, sort_keys=True)
+        st.session_state.import_answers_store_digest = hashlib.sha256(store_text.encode("utf-8")).hexdigest()
+        return answers_store
+    return {}
+
+
+def _sync_import_store_from_widgets(quiz: Quiz) -> None:
+    for idx, question in enumerate(quiz.questions, start=1):
+        key = import_answer_key(question, idx)
+        widget_key = f"{key}_widget"
+        qtype = QuestionType.normalize(getattr(question, "question_type", ""))
+        options = [str(item) for item in (question.options or []) if str(item).strip()]
+
+        if qtype == QuestionType.multiple_choice.value and options:
+            items = _choice_items(options)
+            full_options = [_choice_label(item) for item in items]
+            cb_keys = [f"{widget_key}_cb_{i}" for i in range(1, len(full_options) + 1)]
+            if any(cb in st.session_state for cb in cb_keys):
+                selected = [
+                    opt
+                    for opt, cb in zip(full_options, cb_keys)
+                    if bool(st.session_state.get(cb))
+                ]
+                _import_store_set(key, selected)
+            continue
+
+        if qtype == QuestionType.fill_blank.value and _import_blank_count(question) > 1:
+            blank_count = _import_blank_count(question)
+            blank_keys = [f"{widget_key}_blank_{i}" for i in range(1, blank_count + 1)]
+            if any(bk in st.session_state for bk in blank_keys):
+                _import_store_set(
+                    key,
+                    [str(st.session_state.get(bk, "") or "") for bk in blank_keys],
+                )
+            continue
+
+        if widget_key in st.session_state:
+            _import_store_set(key, st.session_state.get(widget_key))
 
 
 def _normalize_import_options(raw: object) -> list[str]:
@@ -459,7 +556,7 @@ def _build_import_question(item: dict[str, Any], index: int) -> Question:
     options = _normalize_import_options(item.get("options") or item.get("choices"))
     qtype, type_label, raw_type = _resolve_import_type(item.get("question_type") or item.get("type"), options)
     if qtype == QuestionType.true_false.value and not options:
-        options = ["True", "False"]
+        options = ["正确", "错误"]
 
     blank_count = 0
     raw_blank_count = item.get("blank_count")
@@ -553,6 +650,24 @@ def import_answer_key(question: Question, index: int) -> str:
     return f"import_answer_{index}_{safe_id}"
 
 
+def _import_store_get(answer_key: str) -> object:
+    store = st.session_state.get("import_answers_store", {})
+    if isinstance(store, dict):
+        return store.get(answer_key)
+    return None
+
+
+def _import_store_set(answer_key: str, value: object) -> None:
+    store = st.session_state.setdefault("import_answers_store", {})
+    if not isinstance(store, dict):
+        store = {}
+        st.session_state.import_answers_store = store
+    if store.get(answer_key) == value:
+        return
+    store[answer_key] = value
+    _persist_import_answers_snapshot(str(st.session_state.get("import_exam_hash", "") or ""))
+
+
 def _import_meta(question: Question) -> tuple[str, str]:
     raw_type = ""
     type_label = ""
@@ -580,13 +695,97 @@ def _import_blank_count(question: Question) -> int:
 def _count_import_answered(quiz: Quiz) -> int:
     answered = 0
     for idx, question in enumerate(quiz.questions, start=1):
-        key = import_answer_key(question, idx)
-        value = st.session_state.get(key)
-        if isinstance(value, list) and value:
-            answered += 1
-        elif isinstance(value, str) and value.strip():
+        if _is_import_question_answered(question, idx):
             answered += 1
     return answered
+
+
+def _first_unanswered_index(quiz: Quiz) -> int | None:
+    for idx, question in enumerate(quiz.questions, start=1):
+        if not _is_import_question_answered(question, idx):
+            return idx
+    return None
+
+
+def _is_import_question_answered(question: Question, index: int) -> bool:
+    key = import_answer_key(question, index)
+    qtype = QuestionType.normalize(getattr(question, "question_type", ""))
+    value = _import_store_get(key)
+    if value is None:
+        value = st.session_state.get(key)
+
+    if qtype == QuestionType.fill_blank.value:
+        blank_count = _import_blank_count(question)
+        if blank_count <= 1:
+            return isinstance(value, str) and bool(value.strip())
+        if isinstance(value, list):
+            valid = [str(v).strip() for v in value if str(v).strip()]
+            return len(valid) >= blank_count
+        return False
+
+    if isinstance(value, list):
+        return len([str(v).strip() for v in value if str(v).strip()]) > 0
+    if isinstance(value, str):
+        return bool(value.strip())
+    return False
+
+
+def _import_type_progress(quiz: Quiz) -> list[tuple[str, int, int]]:
+    progress: dict[str, dict[str, int]] = {}
+    for idx, question in enumerate(quiz.questions, start=1):
+        _, type_label = _import_meta(question)
+        if type_label not in progress:
+            progress[type_label] = {"total": 0, "answered": 0}
+        progress[type_label]["total"] += 1
+        if _is_import_question_answered(question, idx):
+            progress[type_label]["answered"] += 1
+    return sorted(
+        [(label, item["answered"], item["total"]) for label, item in progress.items()],
+        key=lambda x: x[0],
+    )
+
+
+def render_import_answer_sheet(quiz: Quiz, page_size: int) -> None:
+    total = len(quiz.questions)
+    if total <= 0:
+        return
+
+    answered = _count_import_answered(quiz)
+    first_unanswered = _first_unanswered_index(quiz)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    current_page = int(st.session_state.get("import_page", 1) or 1)
+    current_page = max(1, min(total_pages, current_page))
+    start = (current_page - 1) * page_size + 1
+    end = min(total, current_page * page_size)
+
+    st.markdown("**作答记录**")
+    st.progress(answered / max(1, total), text=f"已作答 {answered}/{total}")
+    st.caption(f"当前页：{current_page}/{total_pages}（第 {start}-{end} 题）")
+    if first_unanswered is not None:
+        st.caption(f"首个未作答：第 {first_unanswered} 题")
+    else:
+        st.caption("当前全部题目已作答。")
+
+    answered_numbers: list[int] = []
+    page_status_lines: list[str] = []
+    for idx, question in enumerate(quiz.questions, start=1):
+        done = _is_import_question_answered(question, idx)
+        if done:
+            answered_numbers.append(idx)
+        if start <= idx <= end:
+            page_status_lines.append(f"{idx}. {'✅' if done else '⬜'}")
+
+    preview = "、".join(str(i) for i in answered_numbers[:120])
+    if len(answered_numbers) > 120:
+        preview += f" ...（共 {len(answered_numbers)} 题）"
+    if preview:
+        st.caption("已作答题号")
+        st.markdown(preview)
+    else:
+        st.caption("已作答题号：暂无")
+
+    st.caption("当前页作答状态")
+    st.markdown("  \n".join(page_status_lines) if page_status_lines else "暂无")
 
 
 def _render_rich_text(text: str) -> None:
@@ -613,6 +812,21 @@ def _render_rich_text(text: str) -> None:
     suffix = content[cursor:]
     if suffix.strip():
         st.markdown(suffix)
+
+
+def _escape_markdown_inline(text: str) -> str:
+    value = str(text or "")
+    # Escape Markdown control chars so exported answer text keeps exact literal form.
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|>~])", r"\\\1", value)
+
+
+def _markdown_fence_wrap(text: str) -> list[str]:
+    content = str(text or "")
+    max_run = 0
+    for match in re.finditer(r"`+", content):
+        max_run = max(max_run, len(match.group(0)))
+    fence = "`" * max(3, max_run + 1)
+    return [f"{fence}text", content, fence]
 
 
 def _choice_tokens(count: int) -> list[str]:
@@ -655,12 +869,19 @@ def _choice_label(item: dict[str, str]) -> str:
     return f"{item['token']}. {body}"
 
 
-def _render_option_panel(options: list[str]) -> list[str]:
-    items = _choice_items(options)
-    for item in items:
-        st.markdown(f"**{item['token']}.**")
-        _render_rich_text(item["body"])
-    return [item["token"] for item in items]
+def _render_checkbox_group(
+    base_key: str,
+    options: list[str],
+    existing_values: set[str] | None = None,
+) -> list[str]:
+    selected_values: list[str] = []
+    existing = existing_values or set()
+    for opt_idx, opt in enumerate(options, start=1):
+        cb_key = f"{base_key}_cb_{opt_idx}"
+        checked = st.checkbox(opt, key=cb_key, value=(opt in existing))
+        if checked:
+            selected_values.append(opt)
+    return selected_values
 
 
 def _convert_choice_answer(raw_value: object, options: list[str]) -> list[str]:
@@ -698,9 +919,11 @@ def render_import_exam_questions(quiz: Quiz, page: int, page_size: int) -> None:
         question = quiz.questions[idx]
         index = idx + 1
         key = import_answer_key(question, index)
+        widget_key = f"{key}_widget"
         qtype = QuestionType.normalize(getattr(question, "question_type", ""))
         options = [str(item) for item in (question.options or []) if str(item).strip()]
         raw_type, type_label = _import_meta(question)
+        stored_value = _import_store_get(key)
 
         st.markdown(f"**第 {index} 题（{type_label}）**")
         st.caption(f"题型：{type_label}")
@@ -711,61 +934,107 @@ def render_import_exam_questions(quiz: Quiz, page: int, page_size: int) -> None:
         if qtype == QuestionType.single_choice.value:
             if options:
                 items = _choice_items(options)
-                tokens = [item["token"] for item in items]
-                labels = {item["token"]: _choice_label(item) for item in items}
+                full_options = [_choice_label(item) for item in items]
+                selected_index = None
+                if isinstance(stored_value, str) and stored_value in full_options:
+                    selected_index = full_options.index(stored_value)
+                elif isinstance(stored_value, str):
+                    converted = _convert_choice_answer(stored_value, options)
+                    if converted and converted[0] in full_options:
+                        selected_index = full_options.index(converted[0])
                 st.radio(
                     "选择答案",
-                    tokens,
-                    key=key,
-                    index=None,
-                    format_func=lambda token: labels.get(token, token),
-                    horizontal=True,
+                    full_options,
+                    key=widget_key,
+                    index=selected_index,
                     label_visibility="collapsed",
                 )
+                _import_store_set(key, st.session_state.get(widget_key))
             else:
-                st.text_input("作答", key=key, label_visibility="collapsed")
+                st.text_input(
+                    "作答",
+                    key=widget_key,
+                    value=str(stored_value or ""),
+                    label_visibility="collapsed",
+                )
+                _import_store_set(key, st.session_state.get(widget_key, ""))
         elif qtype == QuestionType.multiple_choice.value:
             if options:
                 items = _choice_items(options)
-                existing_set = set(st.session_state.get(key, []))
-                selected_tokens: list[str] = []
-                for item in items:
-                    cb_key = f"{key}_opt_{item['token']}"
-                    if cb_key not in st.session_state:
-                        st.session_state[cb_key] = item["token"] in existing_set
-                    checked = st.checkbox(_choice_label(item), key=cb_key)
-                    if checked:
-                        selected_tokens.append(item["token"])
-                st.session_state[key] = selected_tokens
+                full_options = [_choice_label(item) for item in items]
+                existing_values: list[str] = []
+                if isinstance(stored_value, list):
+                    existing_values = [str(v).strip() for v in stored_value if str(v).strip()]
+                elif isinstance(stored_value, str) and stored_value.strip():
+                    existing_values = _convert_choice_answer(stored_value, options)
+                selected = _render_checkbox_group(
+                    base_key=widget_key,
+                    options=full_options,
+                    existing_values=set(existing_values),
+                )
+                _import_store_set(key, selected)
             else:
-                st.text_input("作答（多个答案用逗号分隔）", key=key, label_visibility="collapsed")
+                st.text_input(
+                    "作答（多个答案用逗号分隔）",
+                    key=widget_key,
+                    value=str(stored_value or ""),
+                    label_visibility="collapsed",
+                )
+                raw = str(st.session_state.get(widget_key, "") or "")
+                _import_store_set(key, [part.strip() for part in raw.split(",") if part.strip()])
         elif qtype == QuestionType.true_false.value:
-            tf_options = options or ["True", "False"]
+            tf_options = options or ["正确", "错误"]
+            selected_index = None
+            if isinstance(stored_value, str) and stored_value in tf_options:
+                selected_index = tf_options.index(stored_value)
             st.radio(
                 "判断",
                 tf_options,
-                key=key,
-                index=None,
+                key=widget_key,
+                index=selected_index,
                 horizontal=True,
                 label_visibility="collapsed",
             )
+            _import_store_set(key, st.session_state.get(widget_key))
         elif qtype == QuestionType.fill_blank.value:
             blank_count = _import_blank_count(question)
             if blank_count <= 1:
-                st.text_input("填写答案", key=key, label_visibility="collapsed")
+                default_text = ""
+                if isinstance(stored_value, list):
+                    default_text = str(stored_value[0]) if stored_value else ""
+                elif isinstance(stored_value, str):
+                    default_text = stored_value
+                st.text_input(
+                    "填写答案",
+                    key=widget_key,
+                    value=default_text,
+                    label_visibility="collapsed",
+                )
+                _import_store_set(key, st.session_state.get(widget_key, ""))
             else:
                 values: list[str] = []
                 for blank_idx in range(blank_count):
-                    blank_key = f"{key}_blank_{blank_idx + 1}"
+                    blank_key = f"{widget_key}_blank_{blank_idx + 1}"
+                    default_text = ""
+                    if isinstance(stored_value, list) and blank_idx < len(stored_value):
+                        default_text = str(stored_value[blank_idx] or "")
                     text = st.text_input(
                         f"第 {blank_idx + 1} 空",
                         key=blank_key,
+                        value=default_text,
                     )
                     values.append(text)
-                st.session_state[key] = values
+                _import_store_set(key, values)
         else:
             height = 200 if type_label in {"论述题", "案例分析题", "材料分析题", "编程题"} else 120
-            st.text_area("作答", key=key, height=height, label_visibility="collapsed")
+            st.text_area(
+                "作答",
+                key=widget_key,
+                value=str(stored_value or ""),
+                height=height,
+                label_visibility="collapsed",
+            )
+            _import_store_set(key, st.session_state.get(widget_key, ""))
 
 
 def collect_import_answers(quiz: Quiz) -> list[dict[str, object]]:
@@ -774,8 +1043,11 @@ def collect_import_answers(quiz: Quiz) -> list[dict[str, object]]:
         key = import_answer_key(question, idx)
         qtype = QuestionType.normalize(getattr(question, "question_type", ""))
         raw_type, type_label = _import_meta(question)
-        value = st.session_state.get(key)
+        value = _import_store_get(key)
+        if value is None:
+            value = st.session_state.get(key)
         options = [str(item) for item in (question.options or []) if str(item).strip()]
+        answered_flag = _is_import_question_answered(question, idx)
 
         if qtype == QuestionType.multiple_choice.value and options:
             answer = _convert_choice_answer(value, options)
@@ -812,6 +1084,7 @@ def collect_import_answers(quiz: Quiz) -> list[dict[str, object]]:
                 "display_type": type_label,
                 "original_question_type": raw_type,
                 "prompt": question.prompt,
+                "answered": answered_flag,
                 "answer": answer,
             }
         )
@@ -821,6 +1094,10 @@ def collect_import_answers(quiz: Quiz) -> list[dict[str, object]]:
 def _refresh_import_source(raw_text: str, source_name: str, source_kind: str) -> None:
     content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
     if st.session_state.get("import_exam_hash") == content_hash:
+        if not st.session_state.get("import_answers_store"):
+            restored_answers = _load_import_answers_snapshot(content_hash)
+            if restored_answers:
+                st.session_state.import_answers_store = restored_answers
         return
     saved_path = _persist_import_source(raw_text, source_name, source_kind)
     st.session_state.import_exam_hash = content_hash
@@ -830,9 +1107,13 @@ def _refresh_import_source(raw_text: str, source_name: str, source_kind: str) ->
     st.session_state.import_quiz_hash = ""
     st.session_state.import_quiz_data = None
     st.session_state.import_page = 1
+    st.session_state.import_show_answer_record = False
     st.session_state.import_answer_json = ""
     st.session_state.import_answer_md = ""
     clear_import_answer_state()
+    restored_answers = _load_import_answers_snapshot(content_hash)
+    if restored_answers:
+        st.session_state.import_answers_store = restored_answers
 
 
 def render_import_exam_mode() -> None:
@@ -860,6 +1141,8 @@ def render_import_exam_mode() -> None:
         file_name="quizmind_import_template.json",
         mime="application/json",
         width="stretch",
+        key="download_import_template",
+        on_click="ignore",
     )
 
     input_mode = st.radio(
@@ -913,34 +1196,55 @@ def render_import_exam_mode() -> None:
         st.error(f"试卷解析失败：{exc}")
         return
 
+    _sync_import_store_from_widgets(quiz)
     total = len(quiz.questions)
     answered = _count_import_answered(quiz)
+    page_size = int(st.session_state.get("import_page_size", 50) or 50)
+    with st.sidebar:
+        st.markdown("### 刷题辅助")
+        st.toggle(
+            "显示作答记录面板",
+            key="import_show_answer_record",
+            help="默认隐藏，开启后显示实时作答记录。",
+        )
 
     st.markdown(f"### {quiz.title}")
     st.caption(f"题目数量：{total}")
     st.progress(answered / max(1, total), text=f"已作答 {answered} / {total}")
+    type_progress = _import_type_progress(quiz)
+    if type_progress:
+        st.caption(
+            "题型进度："
+            + " | ".join(f"{label} {done}/{all_count}" for label, done, all_count in type_progress)
+        )
 
     nav1, nav2 = st.columns(2)
     with nav1:
         page_size = st.selectbox("每页题数", [20, 50, 100, 200], index=1, key="import_page_size")
     with nav2:
         total_pages = max(1, (total + page_size - 1) // page_size)
-        if int(st.session_state.get("import_page", 1) or 1) > total_pages:
-            st.session_state.import_page = total_pages
-        if int(st.session_state.get("import_page", 1) or 1) < 1:
-            st.session_state.import_page = 1
+        current_page = int(st.session_state.get("import_page", 1) or 1)
+        current_page = max(1, min(total_pages, current_page))
         page = int(
             st.number_input(
                 "页码",
                 min_value=1,
                 max_value=total_pages,
                 step=1,
-                key="import_page",
+                value=current_page,
             )
         )
+        st.session_state.import_page = page
+
+    with st.sidebar:
+        if st.session_state.get("import_show_answer_record", False):
+            with st.expander("作答记录面板", expanded=True):
+                render_import_answer_sheet(quiz, page_size=page_size)
 
     render_import_exam_questions(quiz, page=page, page_size=page_size)
+    _persist_import_answers_snapshot(str(st.session_state.get("import_exam_hash", "") or ""))
 
+    _sync_import_store_from_widgets(quiz)
     answers = collect_import_answers(quiz)
     payload = {
         "title": quiz.title,
@@ -950,12 +1254,16 @@ def render_import_exam_mode() -> None:
         "exported_at": datetime.now().isoformat(),
         "answered_count": answered,
         "question_count": total,
+        "type_progress": [
+            {"type": label, "answered": done, "total": all_count}
+            for label, done, all_count in type_progress
+        ],
         "answers": answers,
     }
     st.session_state.import_answer_json = json.dumps(payload, ensure_ascii=False, indent=2)
 
     answer_md_lines = [
-        f"# {quiz.title} - Answer Sheet",
+        f"# {quiz.title} - 作答记录",
         "",
         f"- 导出时间: {payload['exported_at']}",
         f"- 来源: {source_name}",
@@ -964,10 +1272,16 @@ def render_import_exam_mode() -> None:
         "",
     ]
     for item in answers:
-        answer_text = "；".join(item["answer"]) if item["answer"] else "(未作答)"
+        answer_text = (
+            "；".join(_escape_markdown_inline(x) for x in item["answer"])
+            if item["answer"]
+            else "(未作答)"
+        )
         answer_md_lines.append(f"## 第 {item['index']} 题 ({item['question_id']})")
-        answer_md_lines.append(f"- 题型: {item['display_type']} | 原始类型: {item['original_question_type']}")
-        answer_md_lines.append(item["prompt"])
+        answer_md_lines.append(
+            f"- 题型: {_escape_markdown_inline(item['display_type'])} | 原始类型: {_escape_markdown_inline(item['original_question_type'])}"
+        )
+        answer_md_lines.extend(_markdown_fence_wrap(str(item["prompt"])))
         answer_md_lines.append(f"- 作答: {answer_text}")
         answer_md_lines.append("")
 
@@ -980,6 +1294,8 @@ def render_import_exam_mode() -> None:
         file_name=f"quizmind_answers_{stamp}.json",
         mime="application/json",
         width="stretch",
+        key="download_import_answers_json",
+        on_click="ignore",
     )
     st.download_button(
         "下载答案（Markdown）",
@@ -987,6 +1303,8 @@ def render_import_exam_mode() -> None:
         file_name=f"quizmind_answers_{stamp}.md",
         mime="text/markdown",
         width="stretch",
+        key="download_import_answers_md",
+        on_click="ignore",
     )
 def show_model_fallback_notice(provider) -> None:
     chain = list(getattr(provider, "last_model_chain", []) or [])
@@ -1014,20 +1332,8 @@ def init_state() -> None:
         "exam_timeout_processed": False,
         "last_generation_mode": QuizMode.practice.value,
         "flow_step": 1,
-        "selected_record_id": "",
-        "interactive_html": "",
-        "interactive_key": "",
         "last_session_logged_key": "",
-        "scene_description": "",
-        "scene_start_description": "",
-        "scene_interview_mode": "引导模式",
-        "scene_transcript": [],
-        "scene_active": False,
-        "scene_finished": False,
-        "scene_result": None,
         "learning_style": "老师模式",
-        "strict_ai_generation": False,
-        "ai_quality_review": False,
         "quiz_origin_label": "",
         "import_answer_json": "",
         "import_answer_md": "",
@@ -1037,10 +1343,13 @@ def init_state() -> None:
         "import_source_saved_path": "",
         "import_quiz_hash": "",
         "import_quiz_data": None,
+        "import_answers_store": {},
+        "import_answers_store_digest": "",
         "import_pasted_text": "",
         "import_input_mode": "上传文件",
         "import_page": 1,
         "import_page_size": 50,
+        "import_show_answer_record": False,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -1091,24 +1400,6 @@ def apply_quiz_to_session(
 def reset_result_state() -> None:
     st.session_state.report = None
     st.session_state.reinforcement_quiz = None
-
-
-def resume_last_training(user_store: UserFeatureStore) -> bool:
-    loaded = user_store.load_resume_context()
-    if not loaded:
-        return False
-    parsed, quiz, meta = loaded
-    st.session_state.parsed = parsed
-    set_current_quiz(
-        quiz,
-        origin_label=str(meta.get("origin_label", "上次训练")).strip() or "上次训练",
-    )
-    reset_result_state()
-    st.session_state.source_name = str(meta.get("source_name", "继续训练"))
-    st.session_state.last_generation_mode = QuizMode.practice.value
-    reset_exam_state()
-    goto_step(3)
-    return True
 
 
 def persist_resume_context(
@@ -1288,7 +1579,7 @@ def collect_source() -> tuple[str, str]:
 
 def render_sidebar(
     engine: QuizEngine,
-) -> tuple[QuizConfig, str, str, int, QuizMode, int, bool, bool, bool, bool, bool, str, bool, bool]:
+) -> tuple[QuizConfig, str, str, int, bool]:
     st.sidebar.markdown("### 核心配置")
     source_mode = st.sidebar.radio(
         "内容模式",
@@ -1332,22 +1623,7 @@ def render_sidebar(
             "true_false": 10,
         },
     )
-    return (
-        config,
-        source_mode,
-        memory_query,
-        memory_top_k,
-        QuizMode.practice,
-        0,
-        True,
-        allow_ai_generation,
-        False,
-        False,
-        False,
-        "老师模式",
-        False,
-        False,
-    )
+    return (config, source_mode, memory_query, memory_top_k, allow_ai_generation)
 
 
 def reset_exam_state() -> None:
@@ -1515,22 +1791,6 @@ def apply_quality_guard(
     if len(filtered) < original_total:
         st.warning(f"质量过滤后仅保留 {len(filtered)} 道高质量题，建议重新生成。")
     return quiz.model_copy(update={"questions": filtered})
-
-
-def build_active_config(
-    config: QuizConfig,
-    adaptive_difficulty: bool,
-    user_store: UserFeatureStore,
-) -> QuizConfig:
-    if not adaptive_difficulty:
-        return config
-    mixed = user_store.suggest_difficulty_mix(config.difficulty_mix)
-    if mixed == config.difficulty_mix:
-        return config
-    st.caption(
-        f"自适应难度已生效：easy={mixed['easy']}%, medium={mixed['medium']}%, hard={mixed['hard']}%"
-    )
-    return config.model_copy(update={"difficulty_mix": mixed})
 
 
 def log_learning_session_if_needed(user_store: UserFeatureStore) -> None:
@@ -1943,6 +2203,68 @@ def stage_answering_profile(method: dict[str, object] | None, qtype: str) -> dic
     return profile
 
 
+def _feynman_wrong_question_tasks(report, quiz: Quiz) -> list[dict[str, str]]:
+    qmap = {q.id: q for q in (quiz.questions or [])}
+    cause_cn = {
+        "concept_unclear": "概念不清",
+        "careless_mistake": "粗心错误",
+        "reasoning_error": "推理错误",
+        "knowledge_forgotten": "知识遗忘",
+        "expression_issue": "表达问题",
+        "none": "未分类",
+    }
+    tasks: list[dict[str, str]] = []
+    for wrong in list(report.wrong_questions or [])[:5]:
+        q = qmap.get(wrong.question_id)
+        if not q:
+            continue
+        topic = (q.knowledge_tags or ["该知识点"])[0]
+        cause = cause_cn.get(str(getattr(wrong, "error_category", "") or "none"), "未分类")
+        tasks.append(
+            {
+                "question_id": str(wrong.question_id),
+                "topic": str(topic),
+                "cause": cause,
+                "prompt": str(q.prompt),
+                "template": f"请用 6 岁小朋友能听懂的话解释「{topic}」：它是什么、什么时候用、为什么这题容易错。",
+            }
+        )
+    return tasks
+
+
+def render_hardcore_mastery_panel(report, quiz: Quiz, user_store: UserFeatureStore) -> None:
+    st.markdown("**硬核掌握闭环（费曼 + 主动回忆 + 交错训练 + 间隔复习）**")
+    st.markdown("1. 费曼复述：把错题知识点讲给初学者，暴露自己讲不清的地方。")
+    st.markdown("2. 主动回忆：遮住答案，先写定义、条件、步骤，再核对。")
+    st.markdown("3. 交错训练：混合不同题型，避免只会做同套路题。")
+    st.markdown("4. 间隔复习：按 24 小时、72 小时、7 天安排短测。")
+
+    tasks = _feynman_wrong_question_tasks(report, quiz)
+    if not tasks:
+        st.caption("本轮无错题，建议直接进入迁移应用训练。")
+        return
+
+    st.markdown("**费曼复述任务卡（按错题生成）**")
+    for idx, task in enumerate(tasks, start=1):
+        with st.expander(f"任务 {idx}：{task['topic']}（{task['cause']}）", expanded=idx == 1):
+            st.markdown(f"题号：`{task['question_id']}`")
+            st.markdown(task["prompt"])
+            st.caption(task["template"])
+            st.text_area(
+                "我的复述",
+                key=f"feynman_note_{task['question_id']}",
+                height=100,
+                placeholder="按“定义 -> 条件 -> 常见误区 -> 例子”来讲。",
+            )
+
+    focus = _daily_training_focus(user_store, report, quiz)
+    if focus:
+        st.markdown("**下一轮交错训练建议**")
+        st.caption(
+            "将以下主题交错练习，每次 8-12 题，主客观题混合："
+            + "、".join(focus[:4])
+        )
+
 
 
 
@@ -1986,23 +2308,22 @@ def render_question_widget(
         if not ({"正确", "错误"}.issubset(set(options))):
             options = ["正确", "错误"]
 
-    prompt = (question.prompt or "").strip() or "(Missing prompt: please regenerate this question)"
+    prompt = (question.prompt or "").strip() or "（题干缺失，请重新生成该题）"
     difficulty_value = getattr(question.difficulty, "value", str(question.difficulty))
-    tags = question.knowledge_tags[:2] if question.knowledge_tags else ["untagged"]
+    tags = question.knowledge_tags[:2] if question.knowledge_tags else ["未标注"]
     safe_id = html.escape(str(question.id))
     safe_type = html.escape(qtype_label(question.question_type))
     safe_diff = html.escape(diff_label(str(difficulty_value)))
     safe_tags = html.escape("/".join(tags))
-    safe_prompt = html.escape(prompt)
-
     st.markdown(
         f'<div class="qm-question-card">'
-        f'<div class="qm-question-head"><div class="qm-question-title">{safe_id} 路 {safe_type}</div></div>'
+        f'<div class="qm-question-head"><div class="qm-question-title">{safe_id} · {safe_type}</div></div>'
         f'<div class="qm-question-meta"><span class="qm-chip">{safe_diff}</span>'
-        f'<span class="qm-chip">{safe_tags}</span></div>'
-        f'<div class="qm-question-prompt">{safe_prompt}</div></div>',
+        f'<span class="qm-chip">{safe_tags}</span></div></div>',
         unsafe_allow_html=True,
     )
+    with st.container(border=True):
+        _render_rich_text(prompt)
     st.caption(answer_profile["hint"])
     c1, c2 = st.columns([1, 2])
     with c1:
@@ -2032,16 +2353,17 @@ def render_question_widget(
 
     if qtype == QuestionType.single_choice.value:
         if options:
-            st.radio(
-                "选择一个", options, key=key, index=None, label_visibility="collapsed"
-            )
+            st.radio("选择一个", options, key=key, index=None, label_visibility="collapsed")
         else:
             st.text_input("作答", key=key, label_visibility="collapsed")
             st.caption("选项缺失，已切换为文本作答。")
     elif qtype == QuestionType.multiple_choice.value:
         if options:
-            st.multiselect(
-                "选择多个", options, key=key, label_visibility="collapsed"
+            existing = set(st.session_state.get(key, []))
+            st.session_state[key] = _render_checkbox_group(
+                base_key=key,
+                options=options,
+                existing_values=existing,
             )
         else:
             st.text_input("作答", key=key, label_visibility="collapsed")
@@ -2261,9 +2583,49 @@ def render_report(user_store: UserFeatureStore) -> None:
     st.markdown("**建议学习路径**")
     for idx, line in enumerate(_learning_path_plan(user_store, report), start=1):
         st.markdown(f"{idx}. {line}")
+    render_hardcore_mastery_panel(report, quiz, user_store)
 
 
 
+
+
+def render_smart_mode_status() -> None:
+    parsed_ready = st.session_state.get("parsed") is not None
+    quiz = st.session_state.get("quiz")
+    quiz_ready = bool(quiz and getattr(quiz, "questions", None))
+    report_ready = st.session_state.get("report") is not None
+    total = len(quiz.questions) if quiz_ready else 0
+    answered = answered_count() if quiz_ready else 0
+
+    steps = [
+        ("1 输入", parsed_ready),
+        ("2 组卷", quiz_ready),
+        ("3 作答", report_ready or (quiz_ready and answered > 0)),
+        ("4 复盘", report_ready),
+    ]
+    status_line = " | ".join(f"{name}{' [ok]' if done else ''}" for name, done in steps)
+    st.caption(f"流程状态：{status_line}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        if st.button("到输入", width="stretch", key="jump_step_1"):
+            goto_step(1)
+            st.rerun()
+    with c2:
+        if st.button("到组卷", width="stretch", key="jump_step_2"):
+            goto_step(2)
+            st.rerun()
+    with c3:
+        if st.button("到作答", width="stretch", key="jump_step_3"):
+            goto_step(3)
+            st.rerun()
+    with c4:
+        if st.button("到复盘", width="stretch", key="jump_step_4"):
+            goto_step(4)
+            st.rerun()
+
+    if quiz_ready:
+        st.progress(answered / max(1, total), text=f"作答进度 {answered}/{total}")
 
 def main() -> None:
     init_state()
@@ -2285,26 +2647,13 @@ def main() -> None:
         render_import_exam_mode()
         return
 
-    (
-        config,
-        source_mode,
-        memory_query,
-        memory_top_k,
-        quiz_mode,
-        exam_minutes,
-        use_saved_first,
-        allow_ai_generation,
-        _enable_interactive_knowledge,
-        _guided_mode,
-        adaptive_difficulty,
-        _learning_style,
-        strict_ai_generation,
-        ai_quality_review,
-    ) = render_sidebar(engine)
-    engine.strict_ai_generation = bool(strict_ai_generation)
-    engine.provider.ai_quality_review = bool(ai_quality_review and allow_ai_generation)
-    active_config = build_active_config(config, adaptive_difficulty, user_store)
+    config, source_mode, memory_query, memory_top_k, allow_ai_generation = render_sidebar(engine)
+    quiz_mode = QuizMode.practice
+    exam_minutes = 0
+    use_saved_first = True
+    active_config = config
     st.caption("左侧仅保留核心参数，页面仅展示主流程。")
+    render_smart_mode_status()
 
     with st.expander("1) 输入与解析", expanded=st.session_state.flow_step == 1):
         render_section_head("输入与解析", "建议先解析再出题，也支持一键解析并出题。")
@@ -2376,8 +2725,6 @@ def main() -> None:
                             )
                             show_model_fallback_notice(engine.provider)
                             reset_result_state()
-                            st.session_state.interactive_html = ""
-                            st.session_state.interactive_key = ""
                             try:
                                 snapshot = engine.save_memory(parsed)
                                 st.session_state.memory_snapshot = snapshot
@@ -2406,7 +2753,11 @@ def main() -> None:
         render_parsed_summary()
     with st.expander("2) 组卷", expanded=st.session_state.flow_step == 2):
         render_section_head("组卷", "根据当前配置生成题目，可切换 AI/本地策略。")
-        if st.button("生成题目", width="stretch"):
+        can_generate = (
+            (source_mode == "memory" and bool(engine.list_memory()))
+            or (source_mode == "current" and bool(st.session_state.parsed or source_text.strip()))
+        )
+        if st.button("生成题目", width="stretch", disabled=not can_generate):
             try:
                 if source_mode == "current":
                     if st.session_state.parsed is not None:
@@ -2491,6 +2842,7 @@ def main() -> None:
             )
             st.markdown(f"当前模式：`{current_mode}`")
             st.caption(f"当前讲解风格：{st.session_state.get('learning_style', '老师模式')}")
+            st.caption("硬核作答法：先回忆再作答，最后补一句“为什么是这个答案”。")
             render_exam_timer()
             if not getattr(st.session_state.quiz, "questions", None):
                 st.warning("当前题目为空，可能是生成或加载失败。")
@@ -2522,7 +2874,17 @@ def main() -> None:
                 if st.session_state.last_generation_mode == QuizMode.practice.value
                 else "交卷"
             )
-            if not st.session_state.report and st.button(submit_label, type="primary", width="stretch"):
+            total_questions = len(getattr(st.session_state.quiz, "questions", []) or [])
+            answered_questions = answered_count() if total_questions else 0
+            if total_questions and answered_questions < total_questions:
+                st.caption(f"未作答题数：{total_questions - answered_questions}")
+            can_submit = total_questions > 0 and answered_questions > 0
+            if not st.session_state.report and st.button(
+                submit_label,
+                type="primary",
+                width="stretch",
+                disabled=not can_submit,
+            ):
                 st.session_state.report = grader.grade(
                     st.session_state.quiz,
                     load_answers_from_state(),

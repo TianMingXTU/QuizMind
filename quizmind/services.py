@@ -22,7 +22,6 @@ from quizmind.models import (
     QuestionType,
     Quiz,
     QuizConfig,
-    SceneTurnResult,
     UserAnswer,
 )
 from quizmind.quiz_bank import QuizBank
@@ -39,112 +38,6 @@ class ContentService:
             except Exception as exc:
                 log_event("service.parse_content.fallback", source_type=source_type, error=str(exc))
                 return fallback_parse_content(source, source_type)
-
-    def generate_interactive_html(self, parsed: ParsedContent, allow_ai_generation: bool = True) -> str:
-        with timed_event("service.generate_interactive_html", title=parsed.title):
-            if allow_ai_generation:
-                html = self.provider.generate_interactive_html(parsed)
-                if html and html.strip():
-                    return html
-            return self._build_local_interactive_html(parsed)
-
-    def _build_local_interactive_html(self, parsed: ParsedContent) -> str:
-        topics = parsed.knowledge_points[:6]
-        if not topics:
-            return "<div style='padding:12px;border:1px solid #ddd;border-radius:10px;'>暂无可展示知识点。</div>"
-
-        buttons = []
-        cards = []
-        for idx, point in enumerate(topics):
-            active = "active" if idx == 0 else ""
-            safe_name = point.name.replace("'", "\\'")
-            buttons.append(
-                f"<button class='tab-btn {active}' onclick=\"showCard({idx})\">{safe_name}</button>"
-            )
-            cards.append(
-                (
-                    f"<div class='card {active}' id='card-{idx}'>"
-                    f"<h3>{point.name}</h3>"
-                    f"<p>{point.summary}</p>"
-                    f"<div class='meta'>关键词：{'、'.join(point.keywords[:5]) or '无'}</div>"
-                    f"</div>"
-                )
-            )
-
-        quiz_data = []
-        for idx, point in enumerate(topics[:3], start=1):
-            correct = point.keywords[0] if point.keywords else point.name
-            quiz_data.append(
-                {
-                    "id": idx,
-                    "q": f"“{point.name}”最相关的关键词是？",
-                    "opts": [correct, "边界条件", "外部因素"],
-                    "a": correct,
-                }
-            )
-
-        html = f"""
-<div class="km-wrap">
-  <h2>互动知识卡：{parsed.title}</h2>
-  <div class="tabs">{''.join(buttons)}</div>
-  <div class="cards">{''.join(cards)}</div>
-  <div class="quiz">
-    <h3>快速自测</h3>
-    <div id="quiz-box"></div>
-  </div>
-</div>
-<style>
-.km-wrap{{font-family: "Microsoft YaHei", Arial, sans-serif; padding:12px; background:#f8fbff; border:1px solid #d9e7f5; border-radius:12px;}}
-.tabs{{display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 12px;}}
-.tab-btn{{border:1px solid #b7cde5; background:#fff; border-radius:999px; padding:6px 12px; cursor:pointer;}}
-.tab-btn.active{{background:#1f6feb; color:#fff; border-color:#1f6feb;}}
-.card{{display:none; background:#fff; border:1px solid #dbe7f3; border-radius:10px; padding:10px;}}
-.card.active{{display:block;}}
-.meta{{font-size:12px; color:#4b5563; margin-top:8px;}}
-.quiz{{margin-top:14px; background:#fff; border:1px solid #dbe7f3; border-radius:10px; padding:10px;}}
-.q-item{{margin:8px 0 12px;}}
-.q-opt{{margin:4px 0;}}
-.q-result{{font-size:12px; margin-top:4px;}}
-</style>
-<script>
-const quizData = {quiz_data};
-function showCard(i){{
-  document.querySelectorAll('.card').forEach((el,idx)=>el.classList.toggle('active', idx===i));
-  document.querySelectorAll('.tab-btn').forEach((el,idx)=>el.classList.toggle('active', idx===i));
-}}
-function renderQuiz(){{
-  const box = document.getElementById('quiz-box');
-  box.innerHTML = '';
-  quizData.forEach((item, idx)=>{{
-    const div = document.createElement('div');
-    div.className = 'q-item';
-    div.innerHTML = `<div><strong>${{idx+1}}.</strong> ${{item.q}}</div>`;
-    item.opts.forEach(opt=>{{
-      const row = document.createElement('div');
-      row.className = 'q-opt';
-      const id = `q${{item.id}}-${{opt}}`;
-      row.innerHTML = `<label><input type="radio" name="q${{item.id}}" value="${{opt}}"> ${{opt}}</label>`;
-      div.appendChild(row);
-    }});
-    const btn = document.createElement('button');
-    btn.textContent = '检查答案';
-    btn.onclick = ()=>{{
-      const checked = div.querySelector(`input[name="q${{item.id}}"]:checked`);
-      const result = div.querySelector('.q-result') || document.createElement('div');
-      result.className='q-result';
-      if(!checked){{ result.textContent='请先选择答案'; result.style.color='#b45309'; }}
-      else if(checked.value===item.a){{ result.textContent='回答正确'; result.style.color='#166534'; }}
-      else {{ result.textContent=`回答错误，正确答案：${{item.a}}`; result.style.color='#b91c1c'; }}
-      if(!div.querySelector('.q-result')) div.appendChild(result);
-    }};
-    div.appendChild(btn);
-    box.appendChild(div);
-  }});
-}}
-renderQuiz();
-</script>
-"""
-        return html
 
 
 class QuizEngine:
@@ -1482,59 +1375,6 @@ class GradingService:
         )
 
 
-class SceneInterviewService:
-    def __init__(self) -> None:
-        self.provider = LangChainQuizProvider()
-
-    def next_turn(
-        self,
-        scene_description: str,
-        transcript: list[dict[str, str]],
-        max_rounds: int = 12,
-        interview_mode: str = "guided",
-    ) -> SceneTurnResult:
-        result = self.provider.run_engineer_scene_turn(
-            scene_description=scene_description,
-            transcript=transcript,
-            max_rounds=max_rounds,
-            interview_mode=interview_mode,
-        )
-        try:
-            normalized = SceneTurnResult.model_validate(result)
-        except Exception as exc:
-            log_event("scene.turn.invalid_payload", error=str(exc))
-            normalized = SceneTurnResult(
-                engineer_message="本轮生成失败，请重试。",
-                should_end=False,
-                is_passed=False,
-                score=0,
-            )
-
-        # 无模型可用时不进入“继续追问”循环，直接结束并提示配置。
-        if normalized.assessment == "模型不可用" or any(
-            "未配置可用模型" in item for item in (normalized.weaknesses or [])
-        ):
-            return normalized.model_copy(update={"should_end": True, "is_passed": False})
-
-        # 只在“明确通过”时结束；未通过时持续追问。
-        if not normalized.is_passed:
-            message = normalized.engineer_message.strip()
-            if "？" not in message and "?" not in message:
-                message = (
-                    f"{message} 请继续说明你的核心设计权衡、故障兜底和可观测性方案。"
-                ).strip()
-            normalized = normalized.model_copy(
-                update={
-                    "should_end": False,
-                    "assessment": normalized.assessment or "尚未通过，继续追问。",
-                    "engineer_message": message,
-                }
-            )
-        else:
-            normalized = normalized.model_copy(update={"should_end": True})
-        return normalized
-
-
 def _build_auxiliary_engine(strict_ai_generation: bool) -> QuizEngine:
     engine = QuizEngine()
     engine.strict_ai_generation = strict_ai_generation
@@ -1572,34 +1412,6 @@ def _select_focus_points(
         if focus_points:
             return focus_points
     return parsed.knowledge_points[:fallback_count]
-
-
-def build_reinforcement_quiz(
-    parsed: ParsedContent,
-    report: FeedbackReport,
-    config: QuizConfig,
-    learning_style: str = "teacher",
-    strict_ai_generation: bool = True,
-) -> Quiz:
-    focus_points = _select_focus_points(parsed, report.reinforcement_topics, fallback_count=3)
-    focused = _build_focused_parsed_content(parsed, focus_points, "强化训练")
-    engine = _build_auxiliary_engine(strict_ai_generation)
-    return engine.generate_quiz(
-        focused,
-        QuizConfig(
-            question_count=min(max(5, len(focus_points) * 2), config.question_count),
-            difficulty_mix={"easy": 20, "medium": 50, "hard": 30},
-            type_mix={
-                "single_choice": 25,
-                "multiple_choice": 20,
-                "fill_blank": 20,
-                "short_answer": 25,
-                "true_false": 10,
-            },
-        ),
-        allow_ai_generation=True,
-        learning_style=learning_style,
-    )
 
 
 def build_targeted_quiz(

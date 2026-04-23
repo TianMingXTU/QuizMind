@@ -129,16 +129,6 @@ def quiz_quality_review_system_prompt() -> str:
     )
 
 
-GENERATE_INTERACTIVE_HTML_PROMPT = (
-    "You are an assistant for generating interactive learning pages.\n"
-    "Return one complete embeddable HTML snippet (including style and script).\n"
-    "Requirements: Chinese copy preferred, clear structure, card layout, clickable topic switch, "
-    "mini quiz (1-3 single-choice questions) with instant feedback.\n"
-    "No external CDN dependency. Do not output markdown code fences.\n"
-    "If Chinese output becomes unstable, use English and never output mojibake."
-)
-
-
 SOURCE_CHUNK_SUMMARY_PROMPT = (
     "You summarize a chunk of learning material.\n"
     "Return plain text only.\n"

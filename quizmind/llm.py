@@ -20,7 +20,6 @@ from quizmind.prompt_center import (
     ENGINEER_SCENE_INTERVIEW_PROMPT,
     ENGINEER_SCENE_MODE_GUIDED_PROMPT,
     ENGINEER_SCENE_MODE_STRICT_PROMPT,
-    GENERATE_INTERACTIVE_HTML_PROMPT,
     SOURCE_CHUNK_SUMMARY_PROMPT,
     SOURCE_MERGE_SUMMARY_PROMPT,
     generate_from_source_system_prompt,
@@ -571,26 +570,6 @@ class LangChainQuizProvider:
             "issues": normalized_issues,
             "summary": str(response.get("summary", "")),
         }
-
-    def generate_interactive_html(self, parsed: ParsedContent) -> Optional[str]:
-        if not self.llm:
-            return None
-
-        payload = {
-            "title": parsed.title,
-            "concepts": parsed.concepts[:8],
-            "knowledge_points": [
-                point.model_dump() for point in parsed.knowledge_points[:8]
-            ],
-        }
-
-        return self._invoke_text(
-            operation="generate_interactive_html",
-            temperature=0.3,
-            system_prompt=GENERATE_INTERACTIVE_HTML_PROMPT,
-            human_prompt="Generate an interactive learning webpage from the parsed result below:\n{payload}",
-            payload=payload,
-        )
 
     def run_engineer_scene_turn(
         self,
@@ -1774,4 +1753,3 @@ class LangChainQuizProvider:
         duplicates = max(0, len(keys) - len(set(keys)))
         score -= duplicates * 8
         return score
-

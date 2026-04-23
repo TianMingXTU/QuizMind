@@ -53,9 +53,3 @@ def timed_event(event: str, **fields: object) -> Iterator[None]:
         duration_ms = round((perf_counter() - start) * 1000, 2)
         log_event(f"{event}.success", duration_ms=duration_ms, **fields)
 
-
-def read_recent_logs(limit: int = 30) -> list[str]:
-    if not LOG_FILE.exists():
-        return []
-    lines = LOG_FILE.read_text(encoding="utf-8").splitlines()
-    return lines[-limit:]
